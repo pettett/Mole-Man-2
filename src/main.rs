@@ -2,6 +2,7 @@ pub mod compute;
 pub mod gl;
 pub mod uniform;
 
+use std::ops::Mul;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -9,7 +10,7 @@ use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
 };
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageUsage, SwapchainImage};
@@ -29,7 +30,8 @@ use vulkano::swapchain::{
 };
 use vulkano::sync::{self, FlushError, GpuFuture};
 use vulkano_win::VkSurfaceBuild;
-use winit::event::{Event, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
@@ -237,12 +239,6 @@ fn main() {
     //we are creating the layout for set 0
     let layout = pipeline.layout().set_layouts().get(0).unwrap();
 
-    let uniform_set = PersistentDescriptorSet::new(
-        layout.clone(),
-        [WriteDescriptorSet::buffer(0, uniform_data_buffer.clone())], // 0 is the binding in GLSL when we use this set
-    )
-    .unwrap();
-
     // let mut command_buffers = gl::get_draw_command_buffers(
     //     device.clone(),
     //     queue.clone(),
@@ -257,6 +253,44 @@ fn main() {
     let mut recreate_swapchain = false;
 
     let mut t = 0f32;
+
+    let mut transform = uniform::Transformations::new(device.clone(), pipeline.clone());
+
+    let w_s = transform.transform();
+
+    *w_s = glm::mat4(
+        200. / dimensions.width as f32,
+        0.,
+        0.,
+        0., //
+        0.,
+        200. / dimensions.height as f32,
+        0.,
+        0., //
+        0.,
+        0.,
+        1.,
+        0., //
+        0.,
+        0.,
+        0.,
+        1., //
+    );
+
+    transform.update_buffer();
+
+    let square_descriptor_set = PersistentDescriptorSet::new(
+        layout.clone(),
+        [
+            WriteDescriptorSet::buffer(1, transform.get_buffer().clone()),
+            WriteDescriptorSet::buffer(0, uniform_data_buffer.clone()),
+        ], // 0 is the binding in GLSL when we use this set
+    )
+    .unwrap();
+
+    let mut dragging = false;
+
+    let mut last_mouse_pos: Option<PhysicalPosition<f64>> = None;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::RedrawEventsCleared => {
@@ -342,7 +376,7 @@ fn main() {
                         PipelineBindPoint::Graphics,
                         pipeline.layout().clone(),
                         0,
-                        uniform_set.clone(),
+                        square_descriptor_set.clone(),
                     )
                     .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
                     .unwrap()
@@ -354,7 +388,7 @@ fn main() {
             };
 
             let mut i = 0f32;
-            for p in &mut tile_positions {
+            for p in &mut tile_positions[1..] {
                 *p = [(t + i).cos(), (t + i).sin()];
                 i += 1.;
             }
@@ -399,6 +433,40 @@ fn main() {
         } => {
             *control_flow = ControlFlow::Exit;
         }
+
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } if dragging => {
+            if let Some(last_pos) = last_mouse_pos {
+                let diff_x = ((position.x - last_pos.x) as f32) * 2. / dimensions.width as f32;
+                let diff_y = ((position.y - last_pos.y) as f32) * 2. / dimensions.height as f32;
+
+                transform.transform().c0.w += diff_x;
+                transform.transform().c1.w += diff_y;
+
+                transform.update_buffer();
+            }
+
+            last_mouse_pos = Some(position);
+        }
+
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            dragging = state == ElementState::Pressed;
+
+            if !dragging {
+                last_mouse_pos = None;
+            }
+        }
+
         Event::WindowEvent {
             event: WindowEvent::Resized(_),
             ..
@@ -426,9 +494,13 @@ layout(binding = 0,set=0) buffer UniformBufferObject {
 	vec2 offset[];
 };
 
+layout(binding = 1) uniform Transforms{
+	mat4 world_to_screen;
+};
+
 void main() {
 	fragColor = color;
-    gl_Position = vec4(position + offset[gl_InstanceIndex] / (gl_InstanceIndex + 1) , 0.0, 1.0);
+    gl_Position = vec4(position + offset[gl_InstanceIndex] , 0.0, 1.0) * world_to_screen;
 }"
     }
 }
