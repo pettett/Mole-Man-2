@@ -6,24 +6,27 @@ use std::ops::Mul;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
 };
-use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
-use vulkano::image::view::ImageView;
-use vulkano::image::{ImageUsage, SwapchainImage};
-use vulkano::instance::{Instance, InstanceCreateInfo};
-
-use vulkano::buffer::TypedBufferAccess;
+use vulkano::descriptor_set::{
+    DescriptorSet, DescriptorSetsCollection, PersistentDescriptorSet, WriteDescriptorSet,
+};
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::DeviceExtensions;
+use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
+use vulkano::format::{ClearValue, Format};
+use vulkano::image::view::{ImageView, ImageViewCreateInfo};
+use vulkano::image::{ImageAspects, ImageDimensions, ImageUsage, StorageImage, SwapchainImage};
+use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use vulkano::sampler::{Sampler, SamplerCreateInfo};
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{
     self, AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
@@ -34,6 +37,173 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
+
+fn upload_image(filename: &str, device: Arc<Device>, queue: Arc<Queue>) -> Arc<StorageImage> {
+    let img = image::io::Reader::open(filename).unwrap().decode().unwrap();
+
+    let buf = CpuAccessibleBuffer::from_iter(
+        device.clone(),
+        BufferUsage::all(),
+        false,
+        img.as_bytes().iter().map(|x| *x),
+    )
+    .expect("failed to create buffer");
+
+    let image: Arc<StorageImage> = StorageImage::new(
+        device.clone(),
+        ImageDimensions::Dim2d {
+            width: img.width(),
+            height: img.height(),
+            array_layers: 1, // images can be arrays of layers
+        },
+        Format::R8G8B8A8_UNORM,
+        Some(queue.family()),
+    )
+    .unwrap();
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        device.clone(),
+        queue.family(),
+        CommandBufferUsage::OneTimeSubmit, // don't forget to write the correct buffer usage
+    )
+    .unwrap();
+
+    builder
+        .clear_color_image(image.clone(), ClearValue::Float([0.0, 0.0, 1.0, 1.0]))
+        .unwrap()
+        .copy_buffer_to_image(buf.clone(), image.clone()) // new
+        .unwrap();
+
+    let command_buffer = builder.build().unwrap();
+
+    sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .flush()
+        .unwrap();
+
+    image
+}
+
+struct Engine {
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    viewport: Viewport,
+    render_pass: Arc<RenderPass>,
+}
+impl Engine {
+    fn queue(&self) -> Arc<Queue> {
+        self.queue.clone()
+    }
+    fn device(&self) -> Arc<Device> {
+        self.device.clone()
+    }
+
+    fn viewport(&self) -> Viewport {
+        self.viewport.clone()
+    }
+
+    fn render_pass(&self) -> Arc<RenderPass> {
+        self.render_pass.clone()
+    }
+}
+
+struct Texture {
+    image: Arc<StorageImage>,
+    view: Arc<ImageView<StorageImage>>,
+    sample: Arc<Sampler>,
+}
+
+impl Texture {
+    fn new(path: &str, engine: &Engine) -> Self {
+        let image = upload_image(path, engine.device(), engine.queue());
+
+        let mut aspects = ImageAspects::none();
+        aspects.color = true;
+
+        let view = ImageView::new(
+            image.clone(),
+            ImageViewCreateInfo {
+                format: Some(Format::R8G8B8A8_UNORM),
+                aspects,
+                ..ImageViewCreateInfo::default()
+            },
+        )
+        .unwrap();
+
+        let sample = Sampler::new(
+            engine.device(),
+            SamplerCreateInfo::simple_repeat_linear_no_mipmap(),
+        )
+        .unwrap();
+
+        Self {
+            view,
+            sample,
+            image,
+        }
+    }
+
+    fn describe(&self, binding: u32) -> WriteDescriptorSet {
+        WriteDescriptorSet::image_view_sampler(binding, self.view.clone(), self.sample.clone())
+    }
+}
+
+struct Material {
+    vs: Arc<ShaderModule>,
+    fs: Arc<ShaderModule>,
+    descriptors: Arc<PersistentDescriptorSet>,
+
+    pipeline: Arc<GraphicsPipeline>,
+}
+
+impl Material {
+    fn new(
+        vs: Arc<ShaderModule>,
+        fs: Arc<ShaderModule>,
+        descriptor_wites: impl IntoIterator<Item = WriteDescriptorSet>,
+        engine: &Engine,
+    ) -> Self {
+        let pipeline = gl::get_pipeline(
+            engine.device(),
+            vs.clone(),
+            fs.clone(),
+            engine.render_pass(),
+            engine.viewport(),
+        );
+
+        Self {
+            vs: vs.clone(),
+            fs: fs.clone(),
+
+            //we are creating the layout for set 0
+            descriptors: PersistentDescriptorSet::new(
+                pipeline.layout().set_layouts().get(0).unwrap().clone(),
+                descriptor_wites,
+            )
+            .unwrap(),
+            pipeline,
+        }
+    }
+
+    fn update_pipeline(&mut self, engine: &Engine) {
+        self.pipeline = gl::get_pipeline(
+            engine.device(),
+            self.vs.clone(),
+            self.fs.clone(),
+            engine.render_pass(),
+            engine.viewport(),
+        )
+    }
+
+    fn descriptors(&self) -> Arc<PersistentDescriptorSet> {
+        self.descriptors.clone()
+    }
+
+    fn pipeline(&self) -> &Arc<GraphicsPipeline> {
+        &self.pipeline
+    }
+}
 
 fn main() {
     println!("Hello, world!");
@@ -176,6 +346,7 @@ fn main() {
     gl::copy_between_buffers(&device, &queue);
 
     compute::perform_compute(&device, &queue);
+
     //create the render pass and buffers
     let render_pass = gl::get_render_pass(device.clone(), swapchain.clone());
     let mut framebuffers = gl::get_framebuffers(&images, render_pass.clone());
@@ -213,31 +384,27 @@ fn main() {
     )
     .unwrap();
 
-    let vs = vs::load(device.clone()).expect("failed to create shader module");
-    let fs = fs::load(device.clone()).expect("failed to create shader module");
+    //let vs = vs::load(device.clone()).unwrap();
+    let vs_texture = vs_texture::load(device.clone()).unwrap();
+    //    let fs = fs::load(device.clone()).unwrap();
+    let fs_texture = fs_texture::load(device.clone()).unwrap();
 
-    let mut viewport = Viewport {
-        origin: [0.0, 0.0],
-        dimensions: surface.window().inner_size().into(),
-        depth_range: 0.0..1.0,
+    let mut engine = Engine {
+        device,
+        queue,
+        viewport: Viewport {
+            origin: [0.0, 0.0],
+            dimensions: surface.window().inner_size().into(),
+            depth_range: 0.0..1.0,
+        },
+        render_pass,
     };
-
-    let mut pipeline = gl::get_pipeline(
-        device.clone(),
-        vs.clone(),
-        fs.clone(),
-        render_pass.clone(),
-        viewport.clone(),
-    );
 
     let mut tile_positions = [[1f32, 1f32], [1f32, 1f32], [1f32, 1f32]];
 
     let uniform_data_buffer =
-        CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, tile_positions)
+        CpuAccessibleBuffer::from_iter(engine.device(), BufferUsage::all(), false, tile_positions)
             .expect("failed to create buffer");
-
-    //we are creating the layout for set 0
-    let layout = pipeline.layout().set_layouts().get(0).unwrap();
 
     // let mut command_buffers = gl::get_draw_command_buffers(
     //     device.clone(),
@@ -254,17 +421,19 @@ fn main() {
 
     let mut t = 0f32;
 
-    let mut transform = uniform::Transformations::new(device.clone(), pipeline.clone());
+    let mut transform = uniform::Transformations::new(engine.device());
 
     let w_s = transform.transform();
 
+    let aspect = dimensions.width as f32 / dimensions.height as f32;
+
     *w_s = glm::mat4(
-        200. / dimensions.width as f32,
+        1.,
         0.,
         0.,
         0., //
         0.,
-        200. / dimensions.height as f32,
+        1. * aspect,
         0.,
         0., //
         0.,
@@ -279,14 +448,19 @@ fn main() {
 
     transform.update_buffer();
 
-    let square_descriptor_set = PersistentDescriptorSet::new(
-        layout.clone(),
+    let cobblestone = Texture::new("assets/cobblestone.png", &engine);
+
+    let mut mat_texture = Material::new(
+        vs_texture,
+        fs_texture,
         [
-            WriteDescriptorSet::buffer(1, transform.get_buffer().clone()),
-            WriteDescriptorSet::buffer(0, uniform_data_buffer.clone()),
-        ], // 0 is the binding in GLSL when we use this set
-    )
-    .unwrap();
+            // 0 is the binding in GLSL when we use this set
+            WriteDescriptorSet::buffer(0, transform.get_buffer()),
+            WriteDescriptorSet::buffer(1, uniform_data_buffer.clone()),
+            cobblestone.describe(3),
+        ],
+        &engine,
+    );
 
     let mut dragging = false;
 
@@ -310,19 +484,14 @@ fn main() {
                     Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
                 };
                 swapchain = new_swapchain;
-                framebuffers = gl::get_framebuffers(&new_images, render_pass.clone());
+                framebuffers = gl::get_framebuffers(&new_images, engine.render_pass().clone());
 
                 if window_resized {
                     window_resized = false;
 
-                    viewport.dimensions = new_dimensions.into();
-                    pipeline = gl::get_pipeline(
-                        device.clone(),
-                        vs.clone(),
-                        fs.clone(),
-                        render_pass.clone(),
-                        viewport.clone(),
-                    );
+                    engine.viewport.dimensions = new_dimensions.into();
+
+                    mat_texture.update_pipeline(&engine);
                     // command_buffers = gl::get_draw_command_buffers(
                     //     device.clone(),
                     //     queue.clone(),
@@ -353,13 +522,14 @@ fn main() {
             let cmd_buffer = {
                 //build the command buffer
                 let mut builder = AutoCommandBufferBuilder::primary(
-                    device.clone(),
-                    queue.family(),
-                    CommandBufferUsage::MultipleSubmit, // don't forget to write the correct buffer usage
+                    engine.device(),
+                    engine.queue().family(),
+                    CommandBufferUsage::OneTimeSubmit, // don't forget to write the correct buffer usage
                 )
                 .unwrap();
 
-                let render_pass = builder
+                // begin render pass
+                builder
                     .begin_render_pass(
                         framebuffer.clone(),
                         SubpassContents::Inline,
@@ -368,15 +538,15 @@ fn main() {
                     .unwrap();
 
                 //render pass started, can now issue draw instructions
-                render_pass
-                    .bind_pipeline_graphics(pipeline.clone())
+                builder
+                    .bind_pipeline_graphics(mat_texture.pipeline().clone())
                     .bind_index_buffer(index_buffer.clone())
                     .bind_vertex_buffers(0, vertex_buffer.clone())
                     .bind_descriptor_sets(
                         PipelineBindPoint::Graphics,
-                        pipeline.layout().clone(),
+                        mat_texture.pipeline().layout().clone(),
                         0,
-                        square_descriptor_set.clone(),
+                        mat_texture.descriptors(),
                     )
                     .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
                     .unwrap()
@@ -403,13 +573,13 @@ fn main() {
             }
 
             //create the future to execute our command buffer
-            let cmd_future = sync::now(device.clone())
+            let cmd_future = sync::now(engine.device())
                 .join(acquire_future)
-                .then_execute(queue.clone(), cmd_buffer)
+                .then_execute(engine.queue(), cmd_buffer)
                 .unwrap();
 
             let execution = cmd_future
-                .then_swapchain_present(queue.clone(), swapchain.clone(), image_i)
+                .then_swapchain_present(engine.queue().clone(), swapchain.clone(), image_i)
                 .then_signal_fence_and_flush();
 
             match execution {
@@ -478,7 +648,49 @@ fn main() {
     });
 }
 
-mod vs {
+// mod vs {
+//     vulkano_shaders::shader! {
+//         ty: "vertex",
+//         src: "
+// #version 450
+
+// layout(location = 0) in vec2 position;
+// layout(location = 1) in vec3 color;
+
+// layout(location = 0) out vec3 fragColor;
+
+// layout(binding = 0) uniform Transforms{
+// 	mat4 world_to_screen;
+// };
+
+// layout(binding = 1 ) buffer UniformBufferObject {
+// 	vec2 offset[];
+// };
+
+// void main() {
+// 	fragColor = color;
+//     gl_Position = vec4(position + offset[gl_InstanceIndex] + 1 , 0.0, 1.0) * world_to_screen;
+// }"
+//     }
+// }
+
+// mod fs {
+//     vulkano_shaders::shader! {
+//         ty: "fragment",
+//         src: "
+// #version 450
+
+// layout(location = 0) in vec3 color;
+
+// layout(location = 0) out vec4 f_color;
+
+// void main() {
+//     f_color = vec4(color.rgb, 1.0);
+// }"
+//     }
+// }
+
+mod vs_texture {
     vulkano_shaders::shader! {
         ty: "vertex",
         src: "
@@ -489,23 +701,27 @@ layout(location = 1) in vec3 color;
 
 
 layout(location = 0) out vec3 fragColor;
+layout(location = 1) out vec2 uv;
 
-layout(binding = 0,set=0) buffer UniformBufferObject {
-	vec2 offset[];
-};
 
-layout(binding = 1) uniform Transforms{
+layout(binding = 0) uniform Transforms{
 	mat4 world_to_screen;
 };
 
+layout(binding = 1 ) buffer UniformBufferObject {
+	vec2 offset[];
+};
+
+
 void main() {
+	uv = position.xy;
 	fragColor = color;
     gl_Position = vec4(position + offset[gl_InstanceIndex] , 0.0, 1.0) * world_to_screen;
 }"
     }
 }
 
-mod fs {
+mod fs_texture {
     vulkano_shaders::shader! {
         ty: "fragment",
         src: "
@@ -513,11 +729,16 @@ mod fs {
 
 
 layout(location = 0) in vec3 color;
+layout(location = 1) in vec2 uv;
 
 layout(location = 0) out vec4 f_color;
 
+
+layout(binding = 3) uniform sampler2D texSampler;
+
+
 void main() {
-    f_color = vec4(color.rgb, 1.0);
+    f_color = vec4(color.rgb , 1.0) *  texture(texSampler, uv);
 }"
     }
 }

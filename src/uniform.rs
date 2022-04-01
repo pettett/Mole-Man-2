@@ -35,7 +35,7 @@ impl Transformations {
 }
 
 impl Transformations {
-    pub fn new(device: Arc<Device>, pipeline: Arc<GraphicsPipeline>) -> Self {
+    pub fn new(device: Arc<Device>) -> Self {
         let uniform_data_buffer = CpuAccessibleBuffer::from_data(
             device.clone(),
             BufferUsage::all(), //TODO: this should be more specific?
