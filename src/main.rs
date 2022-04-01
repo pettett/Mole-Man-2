@@ -14,7 +14,7 @@ use vulkano::command_buffer::{
 use vulkano::descriptor_set::{
     DescriptorSet, DescriptorSetsCollection, PersistentDescriptorSet, WriteDescriptorSet,
 };
-use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
+use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
 use vulkano::device::DeviceExtensions;
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
 use vulkano::format::{ClearValue, Format};
@@ -85,11 +85,76 @@ fn upload_image(filename: &str, device: Arc<Device>, queue: Arc<Queue>) -> Arc<S
     image
 }
 
+struct Chain {
+    swapchain: Arc<Swapchain<Window>>,
+    images: Vec<Arc<SwapchainImage<Window>>>,
+}
+impl Chain {
+    fn swapchain(&self) -> Arc<Swapchain<Window>> {
+        self.swapchain.clone()
+    }
+
+    fn new(
+        device: Arc<Device>,
+        physical_device: &PhysicalDevice,
+        surface: Arc<Surface<Window>>,
+    ) -> Self {
+        let caps = physical_device
+            .surface_capabilities(&surface, Default::default())
+            .expect("failed to get surface capabilities");
+
+        // this size of the swapchain images
+        let dimensions = surface.window().inner_size();
+        let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
+        let image_format = Some(
+            physical_device
+                .surface_formats(&surface, Default::default())
+                .unwrap()[0]
+                .0,
+        );
+
+        let (mut swapchain, images) = Swapchain::new(
+            device.clone(),
+            surface.clone(),
+            SwapchainCreateInfo {
+                min_image_count: caps.min_image_count + 1, // How many buffers to use in the swapchain
+                image_format,
+                image_extent: dimensions.into(),
+                image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
+                composite_alpha,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        Self { swapchain, images }
+    }
+}
+
+struct Pass {
+    render_pass: Arc<RenderPass>,
+    //the swapchain is dependant on the render pass, and contains a set of windows that could be drawn to
+    framebuffers: Vec<Arc<Framebuffer>>,
+}
+impl Pass {
+    fn new(chain: &Chain, device: Arc<Device>) -> Self {
+        let render_pass = gl::get_render_pass(device, chain.swapchain());
+        let framebuffers = gl::get_framebuffers(&chain.images, render_pass.clone());
+        //create the render pass and buffers
+        Self {
+            render_pass,
+            framebuffers,
+        }
+    }
+}
+
 struct Engine {
     device: Arc<Device>,
     queue: Arc<Queue>,
     viewport: Viewport,
-    render_pass: Arc<RenderPass>,
+    render_pass: Pass,
+    instance: Arc<Instance>,
+    chain: Chain,
 }
 impl Engine {
     fn queue(&self) -> Arc<Queue> {
@@ -104,7 +169,7 @@ impl Engine {
     }
 
     fn render_pass(&self) -> Arc<RenderPass> {
-        self.render_pass.clone()
+        self.render_pass.render_pass.clone()
     }
 }
 
@@ -205,6 +270,32 @@ impl Material {
     }
 }
 
+fn get_physical<'a>(
+    instance: &'a Arc<Instance>,
+    device_extensions: DeviceExtensions,
+    surface: &Surface<Window>,
+) -> (PhysicalDevice<'a>, QueueFamily<'a>) {
+    // pick the best physical device and queue1
+    PhysicalDevice::enumerate(instance)
+        .filter(|&p| p.supported_extensions().is_superset_of(&device_extensions))
+        .filter_map(|p| {
+            p.queue_families()
+                // Find the first first queue family that is suitable.
+                // If none is found, `None` is returned to `filter_map`,
+                // which disqualifies this physical device.
+                .find(|&q| q.supports_graphics() && q.supports_surface(surface).unwrap_or(false))
+                .map(|q| (p, q))
+        })
+        .min_by_key(|(p, _)| match p.properties().device_type {
+            PhysicalDeviceType::DiscreteGpu => 0,
+            PhysicalDeviceType::IntegratedGpu => 1,
+            PhysicalDeviceType::VirtualGpu => 2,
+            PhysicalDeviceType::Cpu => 3,
+            PhysicalDeviceType::Other => 4,
+        })
+        .expect("no device available")
+}
+
 fn main() {
     println!("Hello, world!");
 
@@ -226,28 +317,8 @@ fn main() {
         .build_vk_surface(&event_loop, instance.clone())
         .unwrap();
 
-    // pick the best physical device and queue1
-    let (physical_device, graphics_queue) = PhysicalDevice::enumerate(&instance)
-        .filter(|&p| p.supported_extensions().is_superset_of(&device_extensions))
-        .filter_map(|p| {
-            p.queue_families()
-                // Find the first first queue family that is suitable.
-                // If none is found, `None` is returned to `filter_map`,
-                // which disqualifies this physical device.
-                .find(|&q| q.supports_graphics() && q.supports_surface(&surface).unwrap_or(false))
-                .map(|q| (p, q))
-        })
-        .min_by_key(|(p, _)| match p.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            PhysicalDeviceType::Other => 4,
-        })
-        .expect("no device available");
-
     //In the previous section we created an instance and chose a physical device from this instance.
-
+    let (physical_device, graphics_queue) = get_physical(&instance, device_extensions, &surface);
     //But initialization isn't finished yet. Before being able to do anything, we have to create a device.
     //A device is an object that represents an open channel of communication with a physical device, and it is
     //probably the most important object of the Vulkan API.
@@ -284,34 +355,7 @@ fn main() {
     )
     .expect("failed to create device");
 
-    let caps = physical_device
-        .surface_capabilities(&surface, Default::default())
-        .expect("failed to get surface capabilities");
-
-    // this size of the swapchain images
-    let dimensions = surface.window().inner_size();
-    let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
-    let image_format = Some(
-        physical_device
-            .surface_formats(&surface, Default::default())
-            .unwrap()[0]
-            .0,
-    );
     //  caps.min_image_count - normally 1, but all of these are effectively internal, so
-
-    let (mut swapchain, images) = Swapchain::new(
-        device.clone(),
-        surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: caps.min_image_count + 1, // How many buffers to use in the swapchain
-            image_format,
-            image_extent: dimensions.into(),
-            image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
-            composite_alpha,
-            ..Default::default()
-        },
-    )
-    .unwrap();
 
     //Since it is possible to request multiple queues, the queues variable returned by the function is in fact an iterator.
     //In this example code this iterator contains just one element, so let's extract it:
@@ -347,9 +391,22 @@ fn main() {
 
     compute::perform_compute(&device, &queue);
 
-    //create the render pass and buffers
-    let render_pass = gl::get_render_pass(device.clone(), swapchain.clone());
-    let mut framebuffers = gl::get_framebuffers(&images, render_pass.clone());
+    let chain = Chain::new(device.clone(), &physical_device, surface.clone());
+
+    let render_pass = Pass::new(&chain, device.clone());
+
+    let mut engine = Engine {
+        device,
+        instance: instance.clone(),
+        queue,
+        viewport: Viewport {
+            origin: [0.0, 0.0],
+            dimensions: surface.window().inner_size().into(),
+            depth_range: 0.0..1.0,
+        },
+        render_pass,
+        chain,
+    };
 
     let vertex1 = gl::Vertex {
         position: [1., 0.],
@@ -369,7 +426,7 @@ fn main() {
     };
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        device.clone(),
+        engine.device(),
         BufferUsage::vertex_buffer(),
         false,
         vec![vertex1, vertex2, vertex3, vertex4].into_iter(),
@@ -377,7 +434,7 @@ fn main() {
     .unwrap();
 
     let index_buffer = CpuAccessibleBuffer::from_iter(
-        device.clone(),
+        engine.device(),
         BufferUsage::index_buffer(),
         false,
         vec![0u32, 1u32, 2u32, 2u32, 0u32, 3u32].into_iter(),
@@ -385,20 +442,9 @@ fn main() {
     .unwrap();
 
     //let vs = vs::load(device.clone()).unwrap();
-    let vs_texture = vs_texture::load(device.clone()).unwrap();
+    let vs_texture = vs_texture::load(engine.device()).unwrap();
     //    let fs = fs::load(device.clone()).unwrap();
-    let fs_texture = fs_texture::load(device.clone()).unwrap();
-
-    let mut engine = Engine {
-        device,
-        queue,
-        viewport: Viewport {
-            origin: [0.0, 0.0],
-            dimensions: surface.window().inner_size().into(),
-            depth_range: 0.0..1.0,
-        },
-        render_pass,
-    };
+    let fs_texture = fs_texture::load(engine.device()).unwrap();
 
     let mut tile_positions = [[1f32, 1f32], [1f32, 1f32], [1f32, 1f32]];
 
@@ -425,7 +471,9 @@ fn main() {
 
     let w_s = transform.transform();
 
-    let aspect = dimensions.width as f32 / dimensions.height as f32;
+    let screen_size = surface.window().inner_size();
+
+    let aspect = screen_size.width as f32 / screen_size.height as f32;
 
     *w_s = glm::mat4(
         1.,
@@ -473,18 +521,20 @@ fn main() {
 
                 let new_dimensions = surface.window().inner_size();
 
-                let (new_swapchain, new_images) = match swapchain.recreate(SwapchainCreateInfo {
-                    image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
-                    ..swapchain.create_info()
-                }) {
-                    Ok(r) => r,
-                    // This error tends to happen when the user is manually resizing the window.
-                    // Simply restarting the loop is the easiest way to fix this issue.
-                    Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                    Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
-                };
-                swapchain = new_swapchain;
-                framebuffers = gl::get_framebuffers(&new_images, engine.render_pass().clone());
+                let (new_swapchain, new_images) =
+                    match engine.chain.swapchain.recreate(SwapchainCreateInfo {
+                        image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
+                        ..engine.chain.swapchain.create_info()
+                    }) {
+                        Ok(r) => r,
+                        // This error tends to happen when the user is manually resizing the window.
+                        // Simply restarting the loop is the easiest way to fix this issue.
+                        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
+                        Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
+                    };
+                engine.chain.swapchain = new_swapchain;
+                engine.render_pass.framebuffers =
+                    gl::get_framebuffers(&new_images, engine.render_pass().clone());
 
                 if window_resized {
                     window_resized = false;
@@ -505,7 +555,7 @@ fn main() {
             }
             //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
             let (image_i, suboptimal, acquire_future) =
-                match swapchain::acquire_next_image(swapchain.clone(), None) {
+                match swapchain::acquire_next_image(engine.chain.swapchain.clone(), None) {
                     Ok(r) => r,
                     Err(AcquireError::OutOfDate) => {
                         recreate_swapchain = true;
@@ -517,7 +567,7 @@ fn main() {
             if suboptimal {
                 recreate_swapchain = true;
             }
-            let framebuffer = &framebuffers[image_i];
+            let framebuffer = &engine.render_pass.framebuffers[image_i];
 
             let cmd_buffer = {
                 //build the command buffer
@@ -578,8 +628,14 @@ fn main() {
                 .then_execute(engine.queue(), cmd_buffer)
                 .unwrap();
 
+            //fence is from GPU -> CPU sync, semaphore is GPU to GPU.
+
             let execution = cmd_future
-                .then_swapchain_present(engine.queue().clone(), swapchain.clone(), image_i)
+                .then_swapchain_present(
+                    engine.queue().clone(),
+                    engine.chain.swapchain.clone(),
+                    image_i,
+                )
                 .then_signal_fence_and_flush();
 
             match execution {
@@ -609,8 +665,8 @@ fn main() {
             ..
         } if dragging => {
             if let Some(last_pos) = last_mouse_pos {
-                let diff_x = ((position.x - last_pos.x) as f32) * 2. / dimensions.width as f32;
-                let diff_y = ((position.y - last_pos.y) as f32) * 2. / dimensions.height as f32;
+                let diff_x = ((position.x - last_pos.x) as f32) * 2. / screen_size.width as f32;
+                let diff_y = ((position.y - last_pos.y) as f32) * 2. / screen_size.height as f32;
 
                 transform.transform().c0.w += diff_x;
                 transform.transform().c1.w += diff_y;
