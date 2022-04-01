@@ -5,12 +5,16 @@ version = "0.1.0"
 authors = ["StolenCheese <43613592+StolenCheese@users.noreply.github.com>"]
 edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
+ 
 [dependencies]
 vulkano = "0.29.0"
 vulkano-shaders = "0.29.0"
 bytemuck = "1.8.0"
 vulkano-win = "0.29.0"
-winit = "0.26"
+winit = "0.26.1"
 glm = "0.2.3"
 image = "0.24.1"
+imgui = "0.8.2"
+imgui-winit-support = {version =  "0.8.2", features = ["winit-26"],default-features = false }
+clipboard = "0.5.0"
+

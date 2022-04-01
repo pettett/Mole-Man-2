@@ -1,11 +1,14 @@
 pub mod compute;
 pub mod gl;
+pub mod imgui_vulkano_renderer;
+pub mod texture;
 pub mod uniform;
 
 use std::ops::Mul;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use imgui_vulkano_renderer::Renderer;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{
@@ -26,7 +29,7 @@ use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Sampler, SamplerCreateInfo};
+use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{
     self, AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
@@ -37,53 +40,10 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
+mod clipboard;
+use imgui::{self, Image};
 
-fn upload_image(filename: &str, device: Arc<Device>, queue: Arc<Queue>) -> Arc<StorageImage> {
-    let img = image::io::Reader::open(filename).unwrap().decode().unwrap();
-
-    let buf = CpuAccessibleBuffer::from_iter(
-        device.clone(),
-        BufferUsage::all(),
-        false,
-        img.as_bytes().iter().map(|x| *x),
-    )
-    .expect("failed to create buffer");
-
-    let image: Arc<StorageImage> = StorageImage::new(
-        device.clone(),
-        ImageDimensions::Dim2d {
-            width: img.width(),
-            height: img.height(),
-            array_layers: 1, // images can be arrays of layers
-        },
-        Format::R8G8B8A8_UNORM,
-        Some(queue.family()),
-    )
-    .unwrap();
-
-    let mut builder = AutoCommandBufferBuilder::primary(
-        device.clone(),
-        queue.family(),
-        CommandBufferUsage::OneTimeSubmit, // don't forget to write the correct buffer usage
-    )
-    .unwrap();
-
-    builder
-        .clear_color_image(image.clone(), ClearValue::Float([0.0, 0.0, 1.0, 1.0]))
-        .unwrap()
-        .copy_buffer_to_image(buf.clone(), image.clone()) // new
-        .unwrap();
-
-    let command_buffer = builder.build().unwrap();
-
-    sync::now(device.clone())
-        .then_execute(queue.clone(), command_buffer)
-        .unwrap()
-        .flush()
-        .unwrap();
-
-    image
-}
+use crate::texture::Texture;
 
 struct Chain {
     swapchain: Arc<Swapchain<Window>>,
@@ -170,47 +130,6 @@ impl Engine {
 
     fn render_pass(&self) -> Arc<RenderPass> {
         self.render_pass.render_pass.clone()
-    }
-}
-
-struct Texture {
-    image: Arc<StorageImage>,
-    view: Arc<ImageView<StorageImage>>,
-    sample: Arc<Sampler>,
-}
-
-impl Texture {
-    fn new(path: &str, engine: &Engine) -> Self {
-        let image = upload_image(path, engine.device(), engine.queue());
-
-        let mut aspects = ImageAspects::none();
-        aspects.color = true;
-
-        let view = ImageView::new(
-            image.clone(),
-            ImageViewCreateInfo {
-                format: Some(Format::R8G8B8A8_UNORM),
-                aspects,
-                ..ImageViewCreateInfo::default()
-            },
-        )
-        .unwrap();
-
-        let sample = Sampler::new(
-            engine.device(),
-            SamplerCreateInfo::simple_repeat_linear_no_mipmap(),
-        )
-        .unwrap();
-
-        Self {
-            view,
-            sample,
-            image,
-        }
-    }
-
-    fn describe(&self, binding: u32) -> WriteDescriptorSet {
-        WriteDescriptorSet::image_view_sampler(binding, self.view.clone(), self.sample.clone())
     }
 }
 
@@ -496,7 +415,7 @@ fn main() {
 
     transform.update_buffer();
 
-    let cobblestone = Texture::new("assets/cobblestone.png", &engine);
+    let cobblestone = Texture::load("assets/cobblestone.png", &engine);
 
     let mut mat_texture = Material::new(
         vs_texture,
@@ -510,197 +429,280 @@ fn main() {
         &engine,
     );
 
+    let spite_sheet = Texture::load("assets/tileset.png", &engine);
+
     let mut dragging = false;
 
     let mut last_mouse_pos: Option<PhysicalPosition<f64>> = None;
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::RedrawEventsCleared => {
-            if window_resized || recreate_swapchain {
-                recreate_swapchain = false;
+    // Example with default allocator
+    // IMGUI BS
+    let mut imgui = imgui::Context::create();
+    imgui.set_ini_filename(None);
 
-                let new_dimensions = surface.window().inner_size();
+    if let Some(backend) = clipboard::init() {
+        imgui.set_clipboard_backend(backend);
+    } else {
+        eprintln!("Failed to initialize clipboard");
+    }
 
-                let (new_swapchain, new_images) =
-                    match engine.chain.swapchain.recreate(SwapchainCreateInfo {
-                        image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
-                        ..engine.chain.swapchain.create_info()
-                    }) {
-                        Ok(r) => r,
-                        // This error tends to happen when the user is manually resizing the window.
-                        // Simply restarting the loop is the easiest way to fix this issue.
-                        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                        Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
-                    };
-                engine.chain.swapchain = new_swapchain;
-                engine.render_pass.framebuffers =
-                    gl::get_framebuffers(&new_images, engine.render_pass().clone());
+    let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
+    platform.attach_window(
+        imgui.io_mut(),
+        surface.window(),
+        imgui_winit_support::HiDpiMode::Rounded,
+    );
 
-                if window_resized {
-                    window_resized = false;
+    let hidpi_factor = platform.hidpi_factor();
+    let font_size = (13.0 * hidpi_factor) as f32;
+    imgui
+        .fonts()
+        .add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                size_pixels: font_size,
+                ..imgui::FontConfig::default()
+            }),
+        }]);
 
-                    engine.viewport.dimensions = new_dimensions.into();
+    imgui.io_mut().font_global_scale = (1.0 / hidpi_factor) as f32;
+    let format = engine.chain.swapchain.image_format();
+    let mut renderer = Renderer::init(&mut imgui, engine.device(), engine.queue(), format)
+        .expect("Failed to initialize renderer");
 
-                    mat_texture.update_pipeline(&engine);
-                    // command_buffers = gl::get_draw_command_buffers(
-                    //     device.clone(),
-                    //     queue.clone(),
-                    //     pipeline.clone(),
-                    //     &new_framebuffers,
-                    //     vertex_buffer.clone(),
-                    //     index_buffer.clone(),
-                    //     uniform_set.clone(),
-                    // );
-                }
-            }
-            //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
-            let (image_i, suboptimal, acquire_future) =
-                match swapchain::acquire_next_image(engine.chain.swapchain.clone(), None) {
-                    Ok(r) => r,
-                    Err(AcquireError::OutOfDate) => {
-                        recreate_swapchain = true;
-                        return;
+    let ui_tex = renderer.make_ui_texture(spite_sheet.clone());
+    let id = renderer.textures().insert(ui_tex);
+
+    event_loop.run(move |event, _, control_flow| {
+        platform.handle_event(imgui.io_mut(), surface.window(), &event);
+
+        match event {
+            Event::RedrawEventsCleared => {
+                if window_resized || recreate_swapchain {
+                    recreate_swapchain = false;
+
+                    let new_dimensions = surface.window().inner_size();
+
+                    let (new_swapchain, new_images) =
+                        match engine.chain.swapchain.recreate(SwapchainCreateInfo {
+                            image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
+                            ..engine.chain.swapchain.create_info()
+                        }) {
+                            Ok(r) => r,
+                            // This error tends to happen when the user is manually resizing the window.
+                            // Simply restarting the loop is the easiest way to fix this issue.
+                            Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
+                            Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
+                        };
+                    engine.chain.swapchain = new_swapchain;
+                    engine.render_pass.framebuffers =
+                        gl::get_framebuffers(&new_images, engine.render_pass().clone());
+
+                    if window_resized {
+                        window_resized = false;
+
+                        engine.viewport.dimensions = new_dimensions.into();
+
+                        mat_texture.update_pipeline(&engine);
+                        // command_buffers = gl::get_draw_command_buffers(
+                        //     device.clone(),
+                        //     queue.clone(),
+                        //     pipeline.clone(),
+                        //     &new_framebuffers,
+                        //     vertex_buffer.clone(),
+                        //     index_buffer.clone(),
+                        //     uniform_set.clone(),
+                        // );
                     }
-                    Err(e) => panic!("Failed to acquire next image: {:?}", e),
-                };
-
-            if suboptimal {
-                recreate_swapchain = true;
-            }
-            let framebuffer = &engine.render_pass.framebuffers[image_i];
-
-            let cmd_buffer = {
-                //build the command buffer
-                let mut builder = AutoCommandBufferBuilder::primary(
-                    engine.device(),
-                    engine.queue().family(),
-                    CommandBufferUsage::OneTimeSubmit, // don't forget to write the correct buffer usage
-                )
-                .unwrap();
-
-                // begin render pass
-                builder
-                    .begin_render_pass(
-                        framebuffer.clone(),
-                        SubpassContents::Inline,
-                        vec![[0.0, 0.0, 0.0, 1.0].into()],
-                    )
-                    .unwrap();
-
-                //render pass started, can now issue draw instructions
-                builder
-                    .bind_pipeline_graphics(mat_texture.pipeline().clone())
-                    .bind_index_buffer(index_buffer.clone())
-                    .bind_vertex_buffers(0, vertex_buffer.clone())
-                    .bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        mat_texture.pipeline().layout().clone(),
-                        0,
-                        mat_texture.descriptors(),
-                    )
-                    .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
-                    .unwrap()
-                    .end_render_pass()
-                    .unwrap();
-
-                //return the created command buffer
-                builder.build().unwrap()
-            };
-
-            let mut i = 0f32;
-            for p in &mut tile_positions[1..] {
-                *p = [(t + i).cos(), (t + i).sin()];
-                i += 1.;
-            }
-
-            {
-                //update buffer data
-                let mut w = uniform_data_buffer.write().expect("failed to write buffer");
-
-                for (i, p) in tile_positions.iter().enumerate() {
-                    w[i] = *p;
                 }
-            }
+                //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
+                let (image_i, suboptimal, acquire_future) =
+                    match swapchain::acquire_next_image(engine.chain.swapchain.clone(), None) {
+                        Ok(r) => r,
+                        Err(AcquireError::OutOfDate) => {
+                            recreate_swapchain = true;
+                            return;
+                        }
+                        Err(e) => panic!("Failed to acquire next image: {:?}", e),
+                    };
 
-            //create the future to execute our command buffer
-            let cmd_future = sync::now(engine.device())
-                .join(acquire_future)
-                .then_execute(engine.queue(), cmd_buffer)
-                .unwrap();
-
-            //fence is from GPU -> CPU sync, semaphore is GPU to GPU.
-
-            let execution = cmd_future
-                .then_swapchain_present(
-                    engine.queue().clone(),
-                    engine.chain.swapchain.clone(),
-                    image_i,
-                )
-                .then_signal_fence_and_flush();
-
-            match execution {
-                Ok(future) => {
-                    future.wait(None).unwrap(); // wait for the GPU to finish
-                }
-                Err(FlushError::OutOfDate) => {
+                if suboptimal {
                     recreate_swapchain = true;
                 }
-                Err(e) => {
-                    println!("Failed to flush future: {:?}", e);
+
+                platform
+                    .prepare_frame(imgui.io_mut(), surface.window())
+                    .unwrap();
+
+                let ui = imgui.frame();
+
+                imgui::Window::new("Hello world")
+                    .size([300.0, 110.0], imgui::Condition::FirstUseEver)
+                    .build(&ui, || {
+                        ui.text("Hello world!");
+                        ui.text("こんにちは世界！");
+                        ui.text("This...is...imgui-rs!");
+                        ui.separator();
+                        let mouse_pos = ui.io().mouse_pos;
+                        ui.text(format!(
+                            "Mouse Position: ({:.1},{:.1})",
+                            mouse_pos[0], mouse_pos[1]
+                        ));
+
+                        let [x, y] = spite_sheet.get_size();
+
+                        Image::new(id, [x as f32, y as f32]).build(&ui);
+                    });
+
+                platform.prepare_render(&ui, surface.window());
+
+                let draw_data = ui.render();
+
+                let framebuffer = &engine.render_pass.framebuffers[image_i];
+
+                let cmd_buffer = {
+                    //build the command buffer
+                    let mut builder = AutoCommandBufferBuilder::primary(
+                        engine.device(),
+                        engine.queue().family(),
+                        CommandBufferUsage::OneTimeSubmit, // don't forget to write the correct buffer usage
+                    )
+                    .unwrap();
+
+                    // begin render pass
+                    builder
+                        .begin_render_pass(
+                            framebuffer.clone(),
+                            SubpassContents::Inline,
+                            vec![[0.0, 0.0, 0.0, 1.0].into()],
+                        )
+                        .unwrap();
+
+                    //render pass started, can now issue draw instructions
+                    builder
+                        .bind_pipeline_graphics(mat_texture.pipeline().clone())
+                        .bind_index_buffer(index_buffer.clone())
+                        .bind_vertex_buffers(0, vertex_buffer.clone())
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            mat_texture.pipeline().layout().clone(),
+                            0,
+                            mat_texture.descriptors(),
+                        )
+                        .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
+                        .unwrap();
+
+                    renderer
+                        .draw_commands(
+                            &mut builder,
+                            engine.queue(),
+                            engine.viewport().dimensions,
+                            draw_data,
+                        )
+                        .unwrap();
+
+                    //finish off
+                    builder.end_render_pass().unwrap();
+
+                    //return the created command buffer
+                    builder.build().unwrap()
+                };
+
+                let mut i = 0f32;
+                for p in &mut tile_positions[1..] {
+                    *p = [(t + i).cos(), (t + i).sin()];
+                    i += 1.;
+                }
+
+                {
+                    //update buffer data
+                    let mut w = uniform_data_buffer.write().expect("failed to write buffer");
+
+                    for (i, p) in tile_positions.iter().enumerate() {
+                        w[i] = *p;
+                    }
+                }
+
+                //create the future to execute our command buffer
+                let cmd_future = sync::now(engine.device())
+                    .join(acquire_future)
+                    .then_execute(engine.queue(), cmd_buffer)
+                    .unwrap();
+
+                //fence is from GPU -> CPU sync, semaphore is GPU to GPU.
+
+                let execution = cmd_future
+                    .then_swapchain_present(
+                        engine.queue().clone(),
+                        engine.chain.swapchain.clone(),
+                        image_i,
+                    )
+                    .then_signal_fence_and_flush();
+
+                match execution {
+                    Ok(future) => {
+                        future.wait(None).unwrap(); // wait for the GPU to finish
+                    }
+                    Err(FlushError::OutOfDate) => {
+                        recreate_swapchain = true;
+                    }
+                    Err(e) => {
+                        println!("Failed to flush future: {:?}", e);
+                    }
+                }
+
+                t += 0.02;
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } if dragging => {
+                if let Some(last_pos) = last_mouse_pos {
+                    let diff_x = ((position.x - last_pos.x) as f32) * 2. / screen_size.width as f32;
+                    let diff_y =
+                        ((position.y - last_pos.y) as f32) * 2. / screen_size.height as f32;
+
+                    transform.transform().c0.w += diff_x;
+                    transform.transform().c1.w += diff_y;
+
+                    transform.update_buffer();
+                }
+
+                last_mouse_pos = Some(position);
+            }
+
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                dragging = state == ElementState::Pressed;
+
+                if !dragging {
+                    last_mouse_pos = None;
                 }
             }
 
-            t += 0.02;
-        }
-
-        Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } => {
-            *control_flow = ControlFlow::Exit;
-        }
-
-        Event::WindowEvent {
-            event: WindowEvent::CursorMoved { position, .. },
-            ..
-        } if dragging => {
-            if let Some(last_pos) = last_mouse_pos {
-                let diff_x = ((position.x - last_pos.x) as f32) * 2. / screen_size.width as f32;
-                let diff_y = ((position.y - last_pos.y) as f32) * 2. / screen_size.height as f32;
-
-                transform.transform().c0.w += diff_x;
-                transform.transform().c1.w += diff_y;
-
-                transform.update_buffer();
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                window_resized = true;
             }
-
-            last_mouse_pos = Some(position);
+            Event::MainEventsCleared => {}
+            _ => (),
         }
-
-        Event::WindowEvent {
-            event:
-                WindowEvent::MouseInput {
-                    state,
-                    button: MouseButton::Left,
-                    ..
-                },
-            ..
-        } => {
-            dragging = state == ElementState::Pressed;
-
-            if !dragging {
-                last_mouse_pos = None;
-            }
-        }
-
-        Event::WindowEvent {
-            event: WindowEvent::Resized(_),
-            ..
-        } => {
-            window_resized = true;
-        }
-        Event::MainEventsCleared => {}
-        _ => (),
     });
 }
 
