@@ -16,7 +16,7 @@ use vulkano::{
     sync::{self, GpuFuture},
 };
 
-use crate::Engine;
+use crate::engine::Engine;
 
 pub trait AnyTexture: ImageAccess {}
 

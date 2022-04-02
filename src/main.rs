@@ -1,193 +1,36 @@
 pub mod compute;
+pub mod engine;
 pub mod gl;
 pub mod imgui_vulkano_renderer;
+pub mod material;
 pub mod texture;
 pub mod uniform;
 
-use std::ops::Mul;
 use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
 use imgui_vulkano_renderer::Renderer;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
-};
-use vulkano::descriptor_set::{
-    DescriptorSet, DescriptorSetsCollection, PersistentDescriptorSet, WriteDescriptorSet,
-};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
+use vulkano::descriptor_set::WriteDescriptorSet;
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
 use vulkano::device::DeviceExtensions;
-use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo};
-use vulkano::format::{ClearValue, Format};
-use vulkano::image::view::{ImageView, ImageViewCreateInfo};
-use vulkano::image::{ImageAspects, ImageDimensions, ImageUsage, StorageImage, SwapchainImage};
-use vulkano::instance::{Instance, InstanceCreateInfo};
-use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
-use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::{ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint};
-use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
-use vulkano::shader::ShaderModule;
-use vulkano::swapchain::{
-    self, AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
-};
+
+use vulkano::instance::Instance;
+
+use vulkano::pipeline::{Pipeline, PipelineBindPoint};
+
+use vulkano::swapchain::{self, AcquireError, Surface};
 use vulkano::sync::{self, FlushError, GpuFuture};
-use vulkano_win::VkSurfaceBuild;
+
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
+use winit::event_loop::ControlFlow;
+use winit::window::Window;
 mod clipboard;
 use imgui::{self, Image};
 
 use crate::texture::Texture;
-
-struct Chain {
-    swapchain: Arc<Swapchain<Window>>,
-    images: Vec<Arc<SwapchainImage<Window>>>,
-}
-impl Chain {
-    fn swapchain(&self) -> Arc<Swapchain<Window>> {
-        self.swapchain.clone()
-    }
-
-    fn new(
-        device: Arc<Device>,
-        physical_device: &PhysicalDevice,
-        surface: Arc<Surface<Window>>,
-    ) -> Self {
-        let caps = physical_device
-            .surface_capabilities(&surface, Default::default())
-            .expect("failed to get surface capabilities");
-
-        // this size of the swapchain images
-        let dimensions = surface.window().inner_size();
-        let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
-        let image_format = Some(
-            physical_device
-                .surface_formats(&surface, Default::default())
-                .unwrap()[0]
-                .0,
-        );
-
-        let (mut swapchain, images) = Swapchain::new(
-            device.clone(),
-            surface.clone(),
-            SwapchainCreateInfo {
-                min_image_count: caps.min_image_count + 1, // How many buffers to use in the swapchain
-                image_format,
-                image_extent: dimensions.into(),
-                image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
-                composite_alpha,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        Self { swapchain, images }
-    }
-}
-
-struct Pass {
-    render_pass: Arc<RenderPass>,
-    //the swapchain is dependant on the render pass, and contains a set of windows that could be drawn to
-    framebuffers: Vec<Arc<Framebuffer>>,
-}
-impl Pass {
-    fn new(chain: &Chain, device: Arc<Device>) -> Self {
-        let render_pass = gl::get_render_pass(device, chain.swapchain());
-        let framebuffers = gl::get_framebuffers(&chain.images, render_pass.clone());
-        //create the render pass and buffers
-        Self {
-            render_pass,
-            framebuffers,
-        }
-    }
-}
-
-struct Engine {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-    viewport: Viewport,
-    render_pass: Pass,
-    instance: Arc<Instance>,
-    chain: Chain,
-}
-impl Engine {
-    fn queue(&self) -> Arc<Queue> {
-        self.queue.clone()
-    }
-    fn device(&self) -> Arc<Device> {
-        self.device.clone()
-    }
-
-    fn viewport(&self) -> Viewport {
-        self.viewport.clone()
-    }
-
-    fn render_pass(&self) -> Arc<RenderPass> {
-        self.render_pass.render_pass.clone()
-    }
-}
-
-struct Material {
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-    descriptors: Arc<PersistentDescriptorSet>,
-
-    pipeline: Arc<GraphicsPipeline>,
-}
-
-impl Material {
-    fn new(
-        vs: Arc<ShaderModule>,
-        fs: Arc<ShaderModule>,
-        descriptor_wites: impl IntoIterator<Item = WriteDescriptorSet>,
-        engine: &Engine,
-    ) -> Self {
-        let pipeline = gl::get_pipeline(
-            engine.device(),
-            vs.clone(),
-            fs.clone(),
-            engine.render_pass(),
-            engine.viewport(),
-        );
-
-        Self {
-            vs: vs.clone(),
-            fs: fs.clone(),
-
-            //we are creating the layout for set 0
-            descriptors: PersistentDescriptorSet::new(
-                pipeline.layout().set_layouts().get(0).unwrap().clone(),
-                descriptor_wites,
-            )
-            .unwrap(),
-            pipeline,
-        }
-    }
-
-    fn update_pipeline(&mut self, engine: &Engine) {
-        self.pipeline = gl::get_pipeline(
-            engine.device(),
-            self.vs.clone(),
-            self.fs.clone(),
-            engine.render_pass(),
-            engine.viewport(),
-        )
-    }
-
-    fn descriptors(&self) -> Arc<PersistentDescriptorSet> {
-        self.descriptors.clone()
-    }
-
-    fn pipeline(&self) -> &Arc<GraphicsPipeline> {
-        &self.pipeline
-    }
-}
 
 fn get_physical<'a>(
     instance: &'a Arc<Instance>,
@@ -218,114 +61,7 @@ fn get_physical<'a>(
 fn main() {
     println!("Hello, world!");
 
-    let required_extensions = vulkano_win::required_extensions();
-
-    let device_extensions = DeviceExtensions {
-        khr_swapchain: true,
-        ..DeviceExtensions::none()
-    };
-
-    let instance = Instance::new(InstanceCreateInfo {
-        enabled_extensions: required_extensions,
-        ..Default::default()
-    })
-    .expect("failed to create instance");
-
-    let event_loop = EventLoop::new(); // ignore this for now
-    let surface = WindowBuilder::new()
-        .build_vk_surface(&event_loop, instance.clone())
-        .unwrap();
-
-    //In the previous section we created an instance and chose a physical device from this instance.
-    let (physical_device, graphics_queue) = get_physical(&instance, device_extensions, &surface);
-    //But initialization isn't finished yet. Before being able to do anything, we have to create a device.
-    //A device is an object that represents an open channel of communication with a physical device, and it is
-    //probably the most important object of the Vulkan API.
-
-    for family in physical_device.queue_families() {
-        println!(
-            "Found a queue family with {:?} queue(s)  [C:{:?},G:{:?},T:{:?}]",
-            family.queues_count(),
-            family.supports_compute(),
-            family.supports_graphics(),             //supports vkDraw
-            family.explicitly_supports_transfers(), //all queues can do this, but one does it better if some have this set as false
-        );
-    }
-
-    //Now that we have our desired physical device, the next step is to create a logical device that can support the swapchain.
-
-    //Creating a device returns two things:
-    //- the device itself,
-    //- a list of queue objects that will later allow us to submit operations.
-
-    //Once this function call succeeds we have an open channel of communication with a Vulkan device!
-
-    let (device, mut queues) = Device::new(
-        physical_device,
-        DeviceCreateInfo {
-            // here we pass the desired queue families that we want to use
-            queue_create_infos: vec![QueueCreateInfo::family(graphics_queue)],
-            enabled_extensions: physical_device
-                .required_extensions()
-                .union(&device_extensions), // new
-            //and everything else is set to default
-            ..DeviceCreateInfo::default()
-        },
-    )
-    .expect("failed to create device");
-
-    //  caps.min_image_count - normally 1, but all of these are effectively internal, so
-
-    //Since it is possible to request multiple queues, the queues variable returned by the function is in fact an iterator.
-    //In this example code this iterator contains just one element, so let's extract it:
-
-    //Arc is Atomic RC, reference counted box
-    let queue: Arc<Queue> = queues.next().unwrap();
-
-    //When using Vulkan, you will very often need the GPU to read or write data in memory.
-    //In fact there isn't much point in using the GPU otherwise,
-    //as there is nothing you can do with the results of its work except write them to memory.
-
-    //In order for the GPU to be able to access some data
-    //	(either for reading, writing or both),
-    //	we first need to create a buffer object and put the data in it.
-
-    //The most simple kind of buffer that exists is the `CpuAccessibleBuffer`, which can be created like this:
-
-    // let data: i32 = 12;
-    // let buffer = CpuAccessibleBuffer::from_data(
-    //     device.clone(), //acutally just cloning the arc<>
-    //     BufferUsage::all(),
-    //     false,
-    //     data,
-    // )
-    // .expect("failed to create buffer");
-
-    //The second parameter indicates which purpose we are creating the buffer for,
-    //which can help the implementation perform some optimizations.
-    //Trying to use a buffer in a way that wasn't indicated in its constructor will result in an error.
-    //For the sake of the example, we just create a BufferUsage that allows all possible usages.
-
-    gl::copy_between_buffers(&device, &queue);
-
-    compute::perform_compute(&device, &queue);
-
-    let chain = Chain::new(device.clone(), &physical_device, surface.clone());
-
-    let render_pass = Pass::new(&chain, device.clone());
-
-    let mut engine = Engine {
-        device,
-        instance: instance.clone(),
-        queue,
-        viewport: Viewport {
-            origin: [0.0, 0.0],
-            dimensions: surface.window().inner_size().into(),
-            depth_range: 0.0..1.0,
-        },
-        render_pass,
-        chain,
-    };
+    let (mut engine, event_loop) = engine::Engine::init();
 
     let vertex1 = gl::Vertex {
         position: [1., 0.],
@@ -341,7 +77,7 @@ fn main() {
     };
     let vertex4 = gl::Vertex {
         position: [1., 1.],
-        color: [1., 0., 0.],
+        color: [1., 1., 0.],
     };
 
     let vertex_buffer = CpuAccessibleBuffer::from_iter(
@@ -390,17 +126,17 @@ fn main() {
 
     let w_s = transform.transform();
 
-    let screen_size = surface.window().inner_size();
+    let screen_size = engine.surface().window().inner_size();
 
     let aspect = screen_size.width as f32 / screen_size.height as f32;
 
     *w_s = glm::mat4(
-        1.,
+        0.1,
         0.,
         0.,
         0., //
         0.,
-        1. * aspect,
+        0.1 * aspect,
         0.,
         0., //
         0.,
@@ -417,7 +153,7 @@ fn main() {
 
     let cobblestone = Texture::load("assets/cobblestone.png", &engine);
 
-    let mut mat_texture = Material::new(
+    let mat_texture = engine.create_material(
         vs_texture,
         fs_texture,
         [
@@ -426,7 +162,6 @@ fn main() {
             WriteDescriptorSet::buffer(1, uniform_data_buffer.clone()),
             cobblestone.describe(3),
         ],
-        &engine,
     );
 
     let spite_sheet = Texture::load("assets/tileset.png", &engine);
@@ -449,7 +184,7 @@ fn main() {
     let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
     platform.attach_window(
         imgui.io_mut(),
-        surface.window(),
+        engine.surface().window(),
         imgui_winit_support::HiDpiMode::Rounded,
     );
 
@@ -465,7 +200,9 @@ fn main() {
         }]);
 
     imgui.io_mut().font_global_scale = (1.0 / hidpi_factor) as f32;
-    let format = engine.chain.swapchain.image_format();
+
+    let format = engine.swapchain().swapchain().image_format();
+
     let mut renderer = Renderer::init(&mut imgui, engine.device(), engine.queue(), format)
         .expect("Failed to initialize renderer");
 
@@ -473,36 +210,24 @@ fn main() {
     let id = renderer.textures().insert(ui_tex);
 
     event_loop.run(move |event, _, control_flow| {
-        platform.handle_event(imgui.io_mut(), surface.window(), &event);
+        platform.handle_event(imgui.io_mut(), engine.surface().window(), &event);
 
         match event {
             Event::RedrawEventsCleared => {
                 if window_resized || recreate_swapchain {
                     recreate_swapchain = false;
 
-                    let new_dimensions = surface.window().inner_size();
-
-                    let (new_swapchain, new_images) =
-                        match engine.chain.swapchain.recreate(SwapchainCreateInfo {
-                            image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
-                            ..engine.chain.swapchain.create_info()
-                        }) {
-                            Ok(r) => r,
-                            // This error tends to happen when the user is manually resizing the window.
-                            // Simply restarting the loop is the easiest way to fix this issue.
-                            Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                            Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
-                        };
-                    engine.chain.swapchain = new_swapchain;
-                    engine.render_pass.framebuffers =
-                        gl::get_framebuffers(&new_images, engine.render_pass().clone());
+                    // recreate the swapchain. this *may* result in a new sized image, in this case also update the viewport
+                    let new_dimensions = match engine.recreate_swapchain() {
+                        Err(()) => return,
+                        Ok(new_dimensions) => new_dimensions,
+                    };
 
                     if window_resized {
                         window_resized = false;
 
-                        engine.viewport.dimensions = new_dimensions.into();
+                        engine.update_viewport(new_dimensions.into());
 
-                        mat_texture.update_pipeline(&engine);
                         // command_buffers = gl::get_draw_command_buffers(
                         //     device.clone(),
                         //     queue.clone(),
@@ -516,7 +241,7 @@ fn main() {
                 }
                 //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
                 let (image_i, suboptimal, acquire_future) =
-                    match swapchain::acquire_next_image(engine.chain.swapchain.clone(), None) {
+                    match swapchain::acquire_next_image(engine.swapchain().swapchain(), None) {
                         Ok(r) => r,
                         Err(AcquireError::OutOfDate) => {
                             recreate_swapchain = true;
@@ -530,7 +255,7 @@ fn main() {
                 }
 
                 platform
-                    .prepare_frame(imgui.io_mut(), surface.window())
+                    .prepare_frame(imgui.io_mut(), engine.surface().window())
                     .unwrap();
 
                 let ui = imgui.frame();
@@ -539,7 +264,6 @@ fn main() {
                     .size([300.0, 110.0], imgui::Condition::FirstUseEver)
                     .build(&ui, || {
                         ui.text("Hello world!");
-                        ui.text("こんにちは世界！");
                         ui.text("This...is...imgui-rs!");
                         ui.separator();
                         let mouse_pos = ui.io().mouse_pos;
@@ -553,11 +277,11 @@ fn main() {
                         Image::new(id, [x as f32, y as f32]).build(&ui);
                     });
 
-                platform.prepare_render(&ui, surface.window());
+                platform.prepare_render(&ui, engine.surface().window());
 
                 let draw_data = ui.render();
 
-                let framebuffer = &engine.render_pass.framebuffers[image_i];
+                let framebuffer = &engine.render_pass().get_frame(image_i);
 
                 let cmd_buffer = {
                     //build the command buffer
@@ -577,16 +301,18 @@ fn main() {
                         )
                         .unwrap();
 
+                    let m = engine.get_material(&mat_texture);
+
                     //render pass started, can now issue draw instructions
                     builder
-                        .bind_pipeline_graphics(mat_texture.pipeline().clone())
+                        .bind_pipeline_graphics(m.pipeline.clone())
                         .bind_index_buffer(index_buffer.clone())
                         .bind_vertex_buffers(0, vertex_buffer.clone())
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
-                            mat_texture.pipeline().layout().clone(),
+                            m.pipeline.layout().clone(),
                             0,
-                            mat_texture.descriptors(),
+                            m.descriptors(),
                         )
                         .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
                         .unwrap();
@@ -633,7 +359,7 @@ fn main() {
                 let execution = cmd_future
                     .then_swapchain_present(
                         engine.queue().clone(),
-                        engine.chain.swapchain.clone(),
+                        engine.swapchain().swapchain(),
                         image_i,
                     )
                     .then_signal_fence_and_flush();
