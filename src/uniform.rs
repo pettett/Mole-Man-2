@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use glm::{mat4, Matrix4};
+use glm::{mat4, vec2, vec4, Matrix4, Vec2};
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer},
     descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
@@ -54,5 +54,12 @@ impl Transformations {
         s.update_buffer();
 
         s
+    }
+
+    pub fn screen_to_world(&self, x: f32, y: f32) -> Vec2 {
+        vec2(
+            (x - self.m.c0.w) / self.m.c0.x,
+            (y - self.m.c1.w) / self.m.c1.y,
+        )
     }
 }

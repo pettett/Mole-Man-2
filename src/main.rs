@@ -4,10 +4,13 @@ pub mod gl;
 pub mod imgui_vulkano_renderer;
 pub mod material;
 pub mod texture;
+mod tilemap;
 pub mod uniform;
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use bytemuck::{Pod, Zeroable};
 use imgui_vulkano_renderer::Renderer;
 use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
@@ -20,13 +23,15 @@ use vulkano::instance::Instance;
 
 use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 
+use vulkano::render_pass::Subpass;
 use vulkano::swapchain::{self, AcquireError, Surface};
 use vulkano::sync::{self, FlushError, GpuFuture};
 
+use vulkano_win::VkSurfaceBuild;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-use winit::event_loop::ControlFlow;
-use winit::window::Window;
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::window::{Window, WindowBuilder};
 mod clipboard;
 use imgui::{self, Image};
 
@@ -58,10 +63,29 @@ fn get_physical<'a>(
         .expect("no device available")
 }
 
-fn main() {
+fn main() -> ! {
     println!("Hello, world!");
+    let instance = engine::get_instance();
+    let event_loop = EventLoop::new(); // ignore this for now
+    let surface = WindowBuilder::new()
+        .build_vk_surface(&event_loop, instance.clone())
+        .unwrap();
 
-    let (mut engine, event_loop) = engine::Engine::init();
+    let device_extensions = DeviceExtensions {
+        khr_swapchain: true,
+        ..DeviceExtensions::none()
+    };
+
+    //In the previous section we created an instance and chose a physical device from this instance.
+    let (physical_device, graphics_queue) = get_physical(&instance, device_extensions, &surface);
+
+    let mut engine = engine::Engine::init(
+        instance.clone(),
+        &physical_device,
+        &graphics_queue,
+        surface,
+        &device_extensions,
+    );
 
     let vertex1 = gl::Vertex {
         position: [1., 0.],
@@ -131,12 +155,12 @@ fn main() {
     let aspect = screen_size.width as f32 / screen_size.height as f32;
 
     *w_s = glm::mat4(
-        0.1,
+        0.15 * aspect,
         0.,
         0.,
         0., //
         0.,
-        0.1 * aspect,
+        0.15,
         0.,
         0., //
         0.,
@@ -169,6 +193,7 @@ fn main() {
     let mut dragging = false;
 
     let mut last_mouse_pos: Option<PhysicalPosition<f64>> = None;
+    let mut was_dragging = false;
 
     // Example with default allocator
     // IMGUI BS
@@ -209,6 +234,21 @@ fn main() {
     let ui_tex = renderer.make_ui_texture(spite_sheet.clone());
     let id = renderer.textures().insert(ui_tex);
 
+    //create the tilemap for the desert tile map then create it's material
+
+    let mut desert = tilemap::Tilemap::new(spite_sheet.clone(), &engine);
+
+    let desert_mat = desert.create_material(&mut engine, &transform);
+
+    //    let m = engine.get_material(&desert_mat);
+
+    // let mut desert_cmd_builder = engine.create_secondary(
+    //     CommandBufferUsage::MultipleSubmit,
+    //     engine.render_pass().render_pass().first_subpass(),
+    // );
+
+    // let desert_cmd = Arc::new(desert_cmd_builder.build().unwrap());
+
     event_loop.run(move |event, _, control_flow| {
         platform.handle_event(imgui.io_mut(), engine.surface().window(), &event);
 
@@ -225,8 +265,18 @@ fn main() {
 
                     if window_resized {
                         window_resized = false;
+                        println!("Updating window size");
 
                         engine.update_viewport(new_dimensions.into());
+
+                        let aspect = new_dimensions.height as f32 / new_dimensions.width as f32;
+                        {
+                            let m = transform.transform();
+                            //FIXME:
+                            //changing the x scale gives a more natural looking scaling, but would be better if entire thing zoomed out
+                            m.c0.x = 0.15 * aspect;
+                        }
+                        transform.update_buffer();
 
                         // command_buffers = gl::get_draw_command_buffers(
                         //     device.clone(),
@@ -277,6 +327,33 @@ fn main() {
                         Image::new(id, [x as f32, y as f32]).build(&ui);
                     });
 
+                imgui::Window::new("Tilemap - desert")
+                    .size([200.0, 200.0], imgui::Condition::FirstUseEver)
+                    .build(&ui, || {
+                        let [wx, wy] = ui.window_pos();
+
+                        let l = ui.get_window_draw_list();
+                        let w = 15.0;
+                        let h = 15.0;
+                        for x in 0..16 {
+                            for y in 0..16 {
+                                if *desert.tile(x, y) == tilemap::Tile::Filled {
+                                    l.add_rect_filled_multicolor(
+                                        [10.0 + wx + w * x as f32, 30.0 + wy + h * y as f32],
+                                        [
+                                            10.0 + wx + w * (x + 1) as f32,
+                                            30.0 + wy + h * (y + 1) as f32,
+                                        ],
+                                        imgui::ImColor32::WHITE,
+                                        imgui::ImColor32::WHITE,
+                                        imgui::ImColor32::WHITE,
+                                        imgui::ImColor32::WHITE,
+                                    );
+                                }
+                            }
+                        }
+                    });
+
                 platform.prepare_render(&ui, engine.surface().window());
 
                 let draw_data = ui.render();
@@ -301,6 +378,12 @@ fn main() {
                         )
                         .unwrap();
 
+                    //now, attempt to render the desert map, which has to be in a different subpass
+
+                    //builder.execute_commands(desert_cmd.clone()).unwrap();
+
+                    //    builder.next_subpass(SubpassContents::Inline).unwrap();
+
                     let m = engine.get_material(&mat_texture);
 
                     //render pass started, can now issue draw instructions
@@ -314,7 +397,21 @@ fn main() {
                             0,
                             m.descriptors(),
                         )
-                        .draw_indexed(index_buffer.len() as u32, 3, 0, 0, 0)
+                        .draw_indexed(6, 3, 0, 0, 0)
+                        .unwrap();
+
+                    let m = engine.get_material(&desert_mat);
+                    builder
+                        .bind_pipeline_graphics(m.pipeline.clone())
+                        .bind_index_buffer(index_buffer.clone())
+                        .bind_vertex_buffers(0, vertex_buffer.clone())
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            m.pipeline.layout().clone(),
+                            0,
+                            m.descriptors(),
+                        )
+                        .draw_indexed(6, desert.instance_count(), 0, 0, 0)
                         .unwrap();
 
                     renderer
@@ -389,19 +486,23 @@ fn main() {
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
                 ..
-            } if dragging => {
-                if let Some(last_pos) = last_mouse_pos {
-                    let diff_x = ((position.x - last_pos.x) as f32) * 2. / screen_size.width as f32;
-                    let diff_y =
-                        ((position.y - last_pos.y) as f32) * 2. / screen_size.height as f32;
+            } if !imgui.io().want_capture_mouse => {
+                if dragging && was_dragging {
+                    if let Some(last_pos) = last_mouse_pos {
+                        let diff_x =
+                            ((position.x - last_pos.x) as f32) * 2. / screen_size.width as f32;
+                        let diff_y =
+                            ((position.y - last_pos.y) as f32) * 2. / screen_size.height as f32;
 
-                    transform.transform().c0.w += diff_x;
-                    transform.transform().c1.w += diff_y;
+                        transform.transform().c0.w += diff_x;
+                        transform.transform().c1.w += diff_y;
 
-                    transform.update_buffer();
+                        transform.update_buffer();
+                    }
                 }
 
                 last_mouse_pos = Some(position);
+                was_dragging = dragging;
             }
 
             Event::WindowEvent {
@@ -412,11 +513,42 @@ fn main() {
                         ..
                     },
                 ..
-            } => {
+            } if !imgui.io().want_capture_mouse => {
                 dragging = state == ElementState::Pressed;
+            }
 
-                if !dragging {
-                    last_mouse_pos = None;
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state,
+                        button: MouseButton::Right,
+                        ..
+                    },
+                ..
+            } if !imgui.io().want_capture_mouse && state == ElementState::Pressed => {
+                //alter the tilemap;
+                //first get mouse pos in tilemap, then alter the tilemap
+                let s = engine.surface().window().inner_size();
+
+                let mut x = last_mouse_pos.unwrap().x as f32 / s.width as f32;
+                let mut y = last_mouse_pos.unwrap().y as f32 / s.height as f32;
+
+                x -= 0.5;
+                y -= 0.5;
+                x *= 2.0;
+                y *= 2.0;
+
+                let pos = transform.screen_to_world(x, y);
+
+                if pos.x > 0.0 && pos.y > 0.0 {
+                    let grid_x = pos.x.floor() as usize;
+                    let grid_y = pos.y.floor() as usize;
+
+                    if grid_x < 16 && grid_y < 16 {
+                        println!("grid {}, {}", grid_x, grid_y);
+
+                        desert.toggle(grid_x, grid_y);
+                    }
                 }
             }
 
@@ -429,7 +561,7 @@ fn main() {
             Event::MainEventsCleared => {}
             _ => (),
         }
-    });
+    })
 }
 
 // mod vs {

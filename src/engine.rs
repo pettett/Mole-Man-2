@@ -7,15 +7,19 @@ use std::{
 };
 
 use vulkano::{
+    command_buffer::{
+        pool::standard::StandardCommandPoolBuilder, AutoCommandBufferBuilder, CommandBufferUsage,
+        SecondaryAutoCommandBuffer,
+    },
     descriptor_set::WriteDescriptorSet,
     device::{
-        physical::PhysicalDevice, Device, DeviceCreateInfo, DeviceExtensions, Queue,
-        QueueCreateInfo,
+        physical::{PhysicalDevice, QueueFamily},
+        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo,
     },
     image::{ImageUsage, SwapchainImage},
     instance::{Instance, InstanceCreateInfo},
     pipeline::graphics::viewport::Viewport,
-    render_pass::{Framebuffer, RenderPass},
+    render_pass::{Framebuffer, RenderPass, Subpass},
     shader::ShaderModule,
     swapchain::{Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError},
 };
@@ -33,40 +37,34 @@ static NEXT_MATERIAL_ID: AtomicUsize = AtomicUsize::new(0);
 #[derive(Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MatID(usize);
 
+pub fn get_instance() -> Arc<Instance> {
+    let required_extensions = vulkano_win::required_extensions();
+
+    Instance::new(InstanceCreateInfo {
+        enabled_extensions: required_extensions,
+        ..Default::default()
+    })
+    .expect("failed to create instance")
+}
+
 pub struct Engine {
     device: Arc<Device>,
     queue: Arc<Queue>,
     viewport: Viewport,
     render_pass: Pass,
-    instance: Arc<Instance>,
     chain: Chain,
     surface: Arc<Surface<Window>>,
 
     materials: HashMap<MatID, Material>,
 }
 impl Engine {
-    pub fn init() -> (Self, EventLoop<()>) {
-        let required_extensions = vulkano_win::required_extensions();
-
-        let device_extensions = DeviceExtensions {
-            khr_swapchain: true,
-            ..DeviceExtensions::none()
-        };
-
-        let instance = Instance::new(InstanceCreateInfo {
-            enabled_extensions: required_extensions,
-            ..Default::default()
-        })
-        .expect("failed to create instance");
-
-        let event_loop = EventLoop::new(); // ignore this for now
-        let surface = WindowBuilder::new()
-            .build_vk_surface(&event_loop, instance.clone())
-            .unwrap();
-
-        //In the previous section we created an instance and chose a physical device from this instance.
-        let (physical_device, graphics_queue) =
-            get_physical(&instance, device_extensions, &surface);
+    pub fn init(
+        instance: Arc<Instance>,
+        physical_device: &PhysicalDevice,
+        graphics_queue: &QueueFamily,
+        surface: Arc<Surface<Window>>,
+        device_extensions: &DeviceExtensions,
+    ) -> Self {
         //But initialization isn't finished yet. Before being able to do anything, we have to create a device.
         //A device is an object that represents an open channel of communication with a physical device, and it is
         //probably the most important object of the Vulkan API.
@@ -90,10 +88,10 @@ impl Engine {
         //Once this function call succeeds we have an open channel of communication with a Vulkan device!
 
         let (device, mut queues) = Device::new(
-            physical_device,
+            *physical_device,
             DeviceCreateInfo {
                 // here we pass the desired queue families that we want to use
-                queue_create_infos: vec![QueueCreateInfo::family(graphics_queue)],
+                queue_create_infos: vec![QueueCreateInfo::family(*graphics_queue)],
                 enabled_extensions: physical_device
                     .required_extensions()
                     .union(&device_extensions), // new
@@ -135,31 +133,27 @@ impl Engine {
         //Trying to use a buffer in a way that wasn't indicated in its constructor will result in an error.
         //For the sake of the example, we just create a BufferUsage that allows all possible usages.
 
-        gl::copy_between_buffers(&device, &queue);
+        // gl::copy_between_buffers(&device, &queue);
 
-        compute::perform_compute(&device, &queue);
+        // compute::perform_compute(&device, &queue);
 
         let chain = Chain::new(device.clone(), &physical_device, surface.clone());
 
         let render_pass = Pass::new(&chain, device.clone());
 
-        (
-            Self {
-                device,
-                instance: instance.clone(),
-                queue,
-                viewport: Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: surface.window().inner_size().into(),
-                    depth_range: 0.0..1.0,
-                },
-                surface,
-                render_pass,
-                chain,
-                materials: HashMap::new(),
+        Self {
+            device,
+            queue,
+            viewport: Viewport {
+                origin: [0.0, 0.0],
+                dimensions: surface.window().inner_size().into(),
+                depth_range: 0.0..1.0,
             },
-            event_loop,
-        )
+            surface,
+            render_pass,
+            chain,
+            materials: HashMap::new(),
+        }
     }
 
     pub fn surface(&self) -> Arc<Surface<Window>> {
@@ -183,6 +177,20 @@ impl Engine {
 
     pub fn swapchain(&self) -> &Chain {
         &self.chain
+    }
+
+    pub fn create_secondary(
+        &self,
+        usage: CommandBufferUsage,
+        subpass: Subpass,
+    ) -> AutoCommandBufferBuilder<SecondaryAutoCommandBuffer, StandardCommandPoolBuilder> {
+        AutoCommandBufferBuilder::secondary_graphics(
+            self.device(),
+            self.queue().family(),
+            usage,
+            subpass,
+        )
+        .unwrap()
     }
 
     pub fn recreate_swapchain(&mut self) -> Result<PhysicalSize<u32>, ()> {
