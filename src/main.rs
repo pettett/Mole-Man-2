@@ -3,6 +3,7 @@ pub mod engine;
 pub mod gl;
 pub mod imgui_vulkano_renderer;
 pub mod material;
+mod mesh;
 pub mod texture;
 mod tilemap;
 pub mod uniform;
@@ -35,6 +36,7 @@ use winit::window::{Window, WindowBuilder};
 mod clipboard;
 use imgui::{self, Image};
 
+use crate::mesh::Mesh;
 use crate::texture::Texture;
 
 fn get_physical<'a>(
@@ -87,38 +89,7 @@ fn main() -> ! {
         &device_extensions,
     );
 
-    let vertex1 = gl::Vertex {
-        position: [1., 0.],
-        color: [0., 0., 1.],
-    };
-    let vertex2 = gl::Vertex {
-        position: [0., 0.],
-        color: [0., 1., 0.],
-    };
-    let vertex3 = gl::Vertex {
-        position: [0., 1.],
-        color: [1., 0., 0.],
-    };
-    let vertex4 = gl::Vertex {
-        position: [1., 1.],
-        color: [1., 1., 0.],
-    };
-
-    let vertex_buffer = CpuAccessibleBuffer::from_iter(
-        engine.device(),
-        BufferUsage::vertex_buffer(),
-        false,
-        vec![vertex1, vertex2, vertex3, vertex4].into_iter(),
-    )
-    .unwrap();
-
-    let index_buffer = CpuAccessibleBuffer::from_iter(
-        engine.device(),
-        BufferUsage::index_buffer(),
-        false,
-        vec![0u32, 1u32, 2u32, 2u32, 0u32, 3u32].into_iter(),
-    )
-    .unwrap();
+    let square = <dyn Mesh>::create_unit_square(engine.queue());
 
     //let vs = vs::load(device.clone()).unwrap();
     let vs_texture = vs_texture::load(engine.device()).unwrap();
@@ -384,35 +355,17 @@ fn main() -> ! {
 
                     //    builder.next_subpass(SubpassContents::Inline).unwrap();
 
-                    let m = engine.get_material(&mat_texture);
+                    engine
+                        .get_material(&mat_texture)
+                        .draw(&mut builder, &*square, 3);
 
                     //render pass started, can now issue draw instructions
-                    builder
-                        .bind_pipeline_graphics(m.pipeline.clone())
-                        .bind_index_buffer(index_buffer.clone())
-                        .bind_vertex_buffers(0, vertex_buffer.clone())
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            m.pipeline.layout().clone(),
-                            0,
-                            m.descriptors(),
-                        )
-                        .draw_indexed(6, 3, 0, 0, 0)
-                        .unwrap();
 
-                    let m = engine.get_material(&desert_mat);
-                    builder
-                        .bind_pipeline_graphics(m.pipeline.clone())
-                        .bind_index_buffer(index_buffer.clone())
-                        .bind_vertex_buffers(0, vertex_buffer.clone())
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            m.pipeline.layout().clone(),
-                            0,
-                            m.descriptors(),
-                        )
-                        .draw_indexed(6, desert.instance_count(), 0, 0, 0)
-                        .unwrap();
+                    engine.get_material(&desert_mat).draw(
+                        &mut builder,
+                        &*square,
+                        desert.instance_count(),
+                    );
 
                     renderer
                         .draw_commands(

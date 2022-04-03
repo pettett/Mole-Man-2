@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use vulkano::{
+    command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer},
     descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
-    pipeline::{GraphicsPipeline, Pipeline},
+    pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint},
     shader::ShaderModule,
 };
 
-use crate::{engine::Engine, gl};
+use crate::{engine::Engine, gl, mesh::Mesh};
 
 pub struct Material {
     pub vs: Arc<ShaderModule>,
@@ -43,6 +44,27 @@ impl Material {
             .unwrap(),
             pipeline,
         }
+    }
+
+    pub fn draw(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        mesh: &dyn Mesh,
+        instances: u32,
+    ) {
+        builder.bind_pipeline_graphics(self.pipeline.clone());
+
+        mesh.bind(builder);
+
+        builder
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                self.descriptors(),
+            )
+            .draw_indexed(mesh.indices(), instances, 0, 0, 0)
+            .unwrap();
     }
 
     pub fn descriptors(&self) -> Arc<PersistentDescriptorSet> {
