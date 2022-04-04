@@ -33,7 +33,7 @@ void main() {
 	uint sheet_y = tile.sheet_pos / sheet_width;
 
 	
-	uv = tile_size * vec2(sheet_x, sheet_y) + position.xy * tile_size;
+	uv = tile_size * vec2(sheet_x, sheet_y) + vec2(position.x, 1 - position.y) * tile_size;
 
 	uint grid_x = tile.grid_pos % grid_width;
 	uint grid_y = tile.grid_pos / grid_width;

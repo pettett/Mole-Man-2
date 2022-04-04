@@ -8,12 +8,9 @@ pub mod texture;
 mod tilemap;
 pub mod uniform;
 
-use std::pin::Pin;
 use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
 use imgui_vulkano_renderer::Renderer;
-use vulkano::buffer::TypedBufferAccess;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
 use vulkano::descriptor_set::WriteDescriptorSet;
@@ -22,9 +19,6 @@ use vulkano::device::DeviceExtensions;
 
 use vulkano::instance::Instance;
 
-use vulkano::pipeline::{Pipeline, PipelineBindPoint};
-
-use vulkano::render_pass::Subpass;
 use vulkano::swapchain::{self, AcquireError, Surface};
 use vulkano::sync::{self, FlushError, GpuFuture};
 
@@ -119,30 +113,11 @@ fn main() -> ! {
 
     let mut transform = uniform::Transformations::new(engine.device());
 
-    let w_s = transform.transform();
+    //let w_s = transform.transform();
 
     let screen_size = engine.surface().window().inner_size();
 
-    let aspect = screen_size.width as f32 / screen_size.height as f32;
-
-    *w_s = glm::mat4(
-        0.15 * aspect,
-        0.,
-        0.,
-        0., //
-        0.,
-        0.15,
-        0.,
-        0., //
-        0.,
-        0.,
-        1.,
-        0., //
-        0.,
-        0.,
-        0.,
-        1., //
-    );
+    //let aspect = screen_size.width as f32 / screen_size.height as f32;
 
     transform.update_buffer();
 
@@ -236,7 +211,7 @@ fn main() -> ! {
 
                     if window_resized {
                         window_resized = false;
-                        println!("Updating window size");
+                        //println!("Updating window size");
 
                         engine.update_viewport(new_dimensions.into());
 
@@ -245,7 +220,25 @@ fn main() -> ! {
                             let m = transform.transform();
                             //FIXME:
                             //changing the x scale gives a more natural looking scaling, but would be better if entire thing zoomed out
-                            m.c0.x = 0.15 * aspect;
+
+                            *m = glm::mat4(
+                                0.1 * aspect,
+                                0.,
+                                0.,
+                                0., //
+                                0.,
+                                -0.1,
+                                0.,
+                                0., //
+                                0.,
+                                0.,
+                                1.,
+                                0., //
+                                0.,
+                                0.,
+                                0.,
+                                1., //
+                            );
                         }
                         transform.update_buffer();
 
@@ -260,6 +253,11 @@ fn main() -> ! {
                         // );
                     }
                 }
+            }
+
+            Event::MainEventsCleared => {
+                desert.apply_changes();
+
                 //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
                 let (image_i, suboptimal, acquire_future) =
                     match swapchain::acquire_next_image(engine.swapchain().swapchain(), None) {
@@ -308,7 +306,7 @@ fn main() -> ! {
                         let h = 15.0;
                         for x in 0..16 {
                             for y in 0..16 {
-                                if *desert.tile(x, y) == tilemap::Tile::Filled {
+                                if let tilemap::Tile::Filled(..) = *desert.tile(x, y) {
                                     l.add_rect_filled_multicolor(
                                         [10.0 + wx + w * x as f32, 30.0 + wy + h * y as f32],
                                         [
@@ -355,9 +353,9 @@ fn main() -> ! {
 
                     //    builder.next_subpass(SubpassContents::Inline).unwrap();
 
-                    engine
-                        .get_material(&mat_texture)
-                        .draw(&mut builder, &*square, 3);
+                    // engine
+                    //     .get_material(&mat_texture)
+                    //     .draw(&mut builder, &*square, 3);
 
                     //render pass started, can now issue draw instructions
 
@@ -383,20 +381,20 @@ fn main() -> ! {
                     builder.build().unwrap()
                 };
 
-                let mut i = 0f32;
-                for p in &mut tile_positions[1..] {
-                    *p = [(t + i).cos(), (t + i).sin()];
-                    i += 1.;
-                }
+                // let mut i = 0f32;
+                // for p in &mut tile_positions[1..] {
+                //     *p = [(t + i).cos(), (t + i).sin()];
+                //     i += 1.;
+                // }
 
-                {
-                    //update buffer data
-                    let mut w = uniform_data_buffer.write().expect("failed to write buffer");
+                // {
+                //     //update buffer data
+                //     let mut w = uniform_data_buffer.write().expect("failed to write buffer");
 
-                    for (i, p) in tile_positions.iter().enumerate() {
-                        w[i] = *p;
-                    }
-                }
+                //     for (i, p) in tile_positions.iter().enumerate() {
+                //         w[i] = *p;
+                //     }
+                // }
 
                 //create the future to execute our command buffer
                 let cmd_future = sync::now(engine.device())
@@ -511,7 +509,6 @@ fn main() -> ! {
             } => {
                 window_resized = true;
             }
-            Event::MainEventsCleared => {}
             _ => (),
         }
     })
