@@ -79,7 +79,7 @@ pub struct UITexture {
     set: Arc<PersistentDescriptorSet>,
 }
 
-pub struct Renderer {
+pub struct ImGuiRenderer {
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
     font_texture: UITexture,
@@ -88,7 +88,7 @@ pub struct Renderer {
     idx_buffer_pool: CpuBufferPool<u16>,
 }
 
-impl Renderer {
+impl ImGuiRenderer {
     /// Initialize the renderer object, including vertex buffers, ImGui font textures,
     /// and the Vulkan graphics pipeline.
     ///
@@ -106,7 +106,7 @@ impl Renderer {
         device: Arc<Device>,
         queue: Arc<Queue>,
         format: Format,
-    ) -> Result<Renderer, Box<dyn std::error::Error>> {
+    ) -> Result<ImGuiRenderer, Box<dyn std::error::Error>> {
         let vs = shader::vs::load(device.clone()).unwrap();
         let fs = shader::fs::load(device.clone()).unwrap();
 
@@ -162,7 +162,7 @@ impl Renderer {
             BufferUsage::index_buffer_transfer_destination(),
         );
 
-        Ok(Renderer {
+        Ok(ImGuiRenderer {
             render_pass,
             pipeline,
             font_texture,

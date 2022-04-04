@@ -1,14 +1,19 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+pub mod editor;
 
-use crate::{engine, texture::Texture, uniform::Transformations};
+use crate::{engine, rendering::Renderer, texture::Texture, uniform::Transformations};
 use bitflags::bitflags;
 use bytemuck::{Pod, Zeroable};
 use rand::Rng;
 use vulkano::{
     buffer::{BufferUsage, CpuAccessibleBuffer},
+    command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer},
     descriptor_set::WriteDescriptorSet,
     image::StorageImage,
 };
+
+use bevy_ecs::prelude as ecs;
+
 bitflags! {
     pub struct Orientation: u8 {
         const NONE = 0;
@@ -20,6 +25,10 @@ bitflags! {
         const SW = 0b00100000;
         const NE = 0b01000000;
         const SE = 0b10000000;
+
+
+
+
     }
 }
 
@@ -46,13 +55,63 @@ struct TilemapData {
     sheet_width: u32,
     tiles: [TileData; 16 * 16],
 }
-
+#[derive(ecs::Component)]
 pub struct Tilemap {
     tiles: [[Tile; 16]; 16],
     dirty: bool,
     instance_count: u32,
     texture: Texture<StorageImage>,
     map_buffer: Arc<CpuAccessibleBuffer<TilemapData>>,
+}
+#[derive(Default, Clone, Copy)]
+pub struct TileRequirements {
+    n: Option<bool>,
+    s: Option<bool>,
+    e: Option<bool>,
+    w: Option<bool>,
+
+    ne: Option<bool>,
+    nw: Option<bool>,
+    se: Option<bool>,
+    sw: Option<bool>,
+}
+
+impl TileRequirements {
+    pub fn get_requirement_mut(&mut self, o: Orientation) -> Result<&mut Option<bool>, ()> {
+        match o {
+            Orientation::N => Ok(&mut self.n),
+            Orientation::S => Ok(&mut self.s),
+            Orientation::E => Ok(&mut self.e),
+            Orientation::W => Ok(&mut self.w),
+
+            Orientation::NE => Ok(&mut self.ne),
+            Orientation::NW => Ok(&mut self.nw),
+            Orientation::SE => Ok(&mut self.se),
+            Orientation::SW => Ok(&mut self.nw),
+
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(ecs::Component)]
+pub struct TilemapSpriteConfig {
+    orientations: HashMap<(usize, usize), TileRequirements>,
+}
+
+impl Default for TilemapSpriteConfig {
+    fn default() -> Self {
+        Self {
+            orientations: HashMap::new(),
+        }
+    }
+}
+
+pub fn update_tilemaps(mut query: ecs::Query<&mut Tilemap>) {
+    query.for_each_mut(|mut tilemap| tilemap.apply_changes())
+}
+fn in_range(i: usize, off_i: isize) -> bool {
+    (i == 0 && off_i >= 0 || i > 0) && (i == 15 && off_i <= 0 || i < 15)
 }
 
 impl Tilemap {
@@ -74,6 +133,8 @@ impl Tilemap {
         )
         .expect("failed to create buffer");
 
+        let mut rng = rand::thread_rng();
+
         let mut s = Self {
             tiles: [[Tile::Filled(Orientation::all()); 16]; 16],
             texture,
@@ -81,6 +142,14 @@ impl Tilemap {
             dirty: true,
             map_buffer,
         };
+
+        for x in 0..16 {
+            for y in 0..16 {
+                if rng.gen_bool(0.65) {
+                    s.toggle(x, y);
+                }
+            }
+        }
 
         s.apply_changes();
 
@@ -158,36 +227,83 @@ impl Tilemap {
         &self.tiles[x][y]
     }
 
+    pub fn get_orientation_mut(
+        &mut self,
+        x: usize,
+        y: usize,
+        off_x: isize,
+        off_y: isize,
+    ) -> Option<&mut Orientation> {
+        if in_range(x, off_x) && in_range(y, off_y) {
+            if let Tile::Filled(o) =
+                &mut self.tiles[(x as isize + off_x) as usize][(y as isize + off_y) as usize]
+            {
+                return Some(o);
+            }
+        }
+        return None;
+    }
+
+    pub fn remove_orientation(
+        &mut self,
+        x: usize,
+        y: usize,
+        off_x: isize,
+        off_y: isize,
+        dif: Orientation,
+    ) {
+        if let Some(o) = self.get_orientation_mut(x, y, off_x, off_y) {
+            *o -= dif
+        }
+    }
+    ///Mark tile at `[x][y]` as having a new [`Tile`] adjacent
+    ///
+    ///## Returns
+    ///The change in orientation of the effected tile
+    pub fn add_orientation(
+        &mut self,
+        x: usize,
+        y: usize,
+        off_x: isize,
+        off_y: isize,
+        dif: Orientation,
+    ) -> Orientation {
+        if let Some(o) = self.get_orientation_mut(x, y, off_x, off_y) {
+            o.insert(dif);
+            dif
+        } else {
+            Orientation::NONE
+        }
+    }
+    ///Toggle the tile at `[x][y]`, updating orientations around the tiles
     pub fn toggle(&mut self, x: usize, y: usize) {
         self.tiles[x][y] = match self.tiles[x][y] {
             Tile::Filled(_) => {
-                if x > 0 {
-                    if let Tile::Filled(o) = &mut self.tiles[x - 1][y] {
-                        *o -= Orientation::E
-                    }
-                }
+                self.remove_orientation(x, y, -1, 0, Orientation::E);
+                self.remove_orientation(x, y, 1, 0, Orientation::W);
+                self.remove_orientation(x, y, -1, 0, Orientation::N);
+                self.remove_orientation(x, y, 1, 0, Orientation::S);
 
-                if x < 15 {
-                    if let Tile::Filled(o) = &mut self.tiles[x + 1][y] {
-                        *o -= Orientation::W
-                    }
-                }
-
-                if y > 0 {
-                    if let Tile::Filled(o) = &mut self.tiles[x][y - 1] {
-                        *o -= Orientation::N
-                    }
-                }
-
-                if y < 15 {
-                    if let Tile::Filled(o) = &mut self.tiles[x][y + 1] {
-                        *o -= Orientation::S
-                    }
-                }
+                self.remove_orientation(x, y, -1, -1, Orientation::NE);
+                self.remove_orientation(x, y, -1, 1, Orientation::SE);
+                self.remove_orientation(x, y, 1, -1, Orientation::NW);
+                self.remove_orientation(x, y, 1, 1, Orientation::SW);
 
                 Tile::None
             }
-            Tile::None => Tile::Filled(Orientation::NONE),
+            Tile::None => {
+                let o = self.add_orientation(x, y, -1, 0, Orientation::E)
+                    | self.add_orientation(x, y, 1, 0, Orientation::W)
+                    | self.add_orientation(x, y, 0, -1, Orientation::N)
+                    | self.add_orientation(x, y, 0, 1, Orientation::S)
+                    | self.add_orientation(x, y, -1, -1, Orientation::NE)
+                    | self.add_orientation(x, y, -1, 1, Orientation::SE)
+                    | self.add_orientation(x, y, 1, -1, Orientation::NW)
+                    | self.add_orientation(x, y, 1, 1, Orientation::SW);
+
+                //the orientation of the tile is opposite to the completed insertions
+                Tile::Filled(o.complement())
+            }
         };
 
         self.dirty = true;

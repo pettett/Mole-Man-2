@@ -4,13 +4,17 @@ pub mod gl;
 pub mod imgui_vulkano_renderer;
 pub mod material;
 mod mesh;
+pub mod rendering;
 pub mod texture;
 mod tilemap;
 pub mod uniform;
 
+use bevy_ecs::prelude as ecs;
+use bevy_ecs::schedule::Stage;
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use imgui_vulkano_renderer::Renderer;
+use imgui_vulkano_renderer::ImGuiRenderer;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
 use vulkano::descriptor_set::WriteDescriptorSet;
@@ -90,11 +94,11 @@ fn main() -> ! {
     //    let fs = fs::load(device.clone()).unwrap();
     let fs_texture = fs_texture::load(engine.device()).unwrap();
 
-    let mut tile_positions = [[1f32, 1f32], [1f32, 1f32], [1f32, 1f32]];
+    //let mut tile_positions = [[1f32, 1f32], [1f32, 1f32], [1f32, 1f32]];
 
-    let uniform_data_buffer =
-        CpuAccessibleBuffer::from_iter(engine.device(), BufferUsage::all(), false, tile_positions)
-            .expect("failed to create buffer");
+    // let uniform_data_buffer =
+    //     CpuAccessibleBuffer::from_iter(engine.device(), BufferUsage::all(), false, tile_positions)
+    //         .expect("failed to create buffer");
 
     // let mut command_buffers = gl::get_draw_command_buffers(
     //     device.clone(),
@@ -123,18 +127,18 @@ fn main() -> ! {
 
     let cobblestone = Texture::load("assets/cobblestone.png", &engine);
 
-    let mat_texture = engine.create_material(
-        vs_texture,
-        fs_texture,
-        [
-            // 0 is the binding in GLSL when we use this set
-            WriteDescriptorSet::buffer(0, transform.get_buffer()),
-            WriteDescriptorSet::buffer(1, uniform_data_buffer.clone()),
-            cobblestone.describe(3),
-        ],
-    );
+    // let mat_texture = engine.create_material(
+    //     vs_texture,
+    //     fs_texture,
+    //     [
+    //         // 0 is the binding in GLSL when we use this set
+    //         WriteDescriptorSet::buffer(0, transform.get_buffer()),
+    //         WriteDescriptorSet::buffer(1, uniform_data_buffer.clone()),
+    //         cobblestone.describe(3),
+    //     ],
+    // );
 
-    let spite_sheet = Texture::load("assets/tileset.png", &engine);
+    let sprite_sheet = Texture::load("assets/tileset.png", &engine);
 
     let mut dragging = false;
 
@@ -174,17 +178,22 @@ fn main() -> ! {
 
     let format = engine.swapchain().swapchain().image_format();
 
-    let mut renderer = Renderer::init(&mut imgui, engine.device(), engine.queue(), format)
+    let mut renderer = ImGuiRenderer::init(&mut imgui, engine.device(), engine.queue(), format)
         .expect("Failed to initialize renderer");
-
-    let ui_tex = renderer.make_ui_texture(spite_sheet.clone());
-    let id = renderer.textures().insert(ui_tex);
 
     //create the tilemap for the desert tile map then create it's material
 
-    let mut desert = tilemap::Tilemap::new(spite_sheet.clone(), &engine);
+    let desert = tilemap::Tilemap::new(sprite_sheet.clone(), &engine);
 
     let desert_mat = desert.create_material(&mut engine, &transform);
+
+    let config = Default::default(); // Arc::new(RefCell::new(tilemap::TilemapSpriteConfig::default()));
+
+    let mut config_editor = tilemap::editor::TilemapSpriteConfigEditor::new(
+        &mut renderer,
+        config,
+        sprite_sheet.clone(),
+    );
 
     //    let m = engine.get_material(&desert_mat);
 
@@ -194,6 +203,32 @@ fn main() -> ! {
     // );
 
     // let desert_cmd = Arc::new(desert_cmd_builder.build().unwrap());
+
+    //ECS----------------------------------------------------------
+
+    // Create a new empty World to hold our Entities and Components
+    let mut world = ecs::World::new();
+
+    // Spawn an entity with Position and Velocity components
+    let mut inspecting = world
+        .spawn()
+        .insert(desert)
+        .insert(rendering::Renderer {
+            material: desert_mat,
+        })
+        .id();
+
+    // Create a new Schedule, which defines an execution strategy for Systems
+    let mut schedule = ecs::Schedule::default();
+    // Add a Stage to our schedule. Each Stage in a schedule runs all of its systems
+    // before moving on to the next Stage
+
+    schedule.add_stage(
+        "update",
+        ecs::SystemStage::parallel().with_system(tilemap::update_tilemaps),
+    );
+
+    // MAIN LOOP ---------------------------------------------------------
 
     event_loop.run(move |event, _, control_flow| {
         platform.handle_event(imgui.io_mut(), engine.surface().window(), &event);
@@ -256,8 +291,6 @@ fn main() -> ! {
             }
 
             Event::MainEventsCleared => {
-                desert.apply_changes();
-
                 //To actually start drawing, the first thing that we need to do is to acquire an image to draw:
                 let (image_i, suboptimal, acquire_future) =
                     match swapchain::acquire_next_image(engine.swapchain().swapchain(), None) {
@@ -273,55 +306,51 @@ fn main() -> ! {
                     recreate_swapchain = true;
                 }
 
+                schedule.run(&mut world);
+
                 platform
                     .prepare_frame(imgui.io_mut(), engine.surface().window())
                     .unwrap();
 
                 let ui = imgui.frame();
 
-                imgui::Window::new("Hello world")
+                imgui::Window::new("Tilemap Data Editor")
                     .size([300.0, 110.0], imgui::Condition::FirstUseEver)
-                    .build(&ui, || {
-                        ui.text("Hello world!");
-                        ui.text("This...is...imgui-rs!");
-                        ui.separator();
-                        let mouse_pos = ui.io().mouse_pos;
-                        ui.text(format!(
-                            "Mouse Position: ({:.1},{:.1})",
-                            mouse_pos[0], mouse_pos[1]
-                        ));
+                    .build(&ui, || config_editor.run(&ui));
+                //get entity will not panic if no entity present
+                if let Some(i) = world.get_entity(inspecting) {
+                    if let Some(tilemap) = i.get::<tilemap::Tilemap>() {
+                        imgui::Window::new("Tilemap - desert")
+                            .size([200.0, 200.0], imgui::Condition::FirstUseEver)
+                            .build(&ui, || {
+                                let [wx, wy] = ui.window_pos();
 
-                        let [x, y] = spite_sheet.get_size();
-
-                        Image::new(id, [x as f32, y as f32]).build(&ui);
-                    });
-
-                imgui::Window::new("Tilemap - desert")
-                    .size([200.0, 200.0], imgui::Condition::FirstUseEver)
-                    .build(&ui, || {
-                        let [wx, wy] = ui.window_pos();
-
-                        let l = ui.get_window_draw_list();
-                        let w = 15.0;
-                        let h = 15.0;
-                        for x in 0..16 {
-                            for y in 0..16 {
-                                if let tilemap::Tile::Filled(..) = *desert.tile(x, y) {
-                                    l.add_rect_filled_multicolor(
-                                        [10.0 + wx + w * x as f32, 30.0 + wy + h * y as f32],
-                                        [
-                                            10.0 + wx + w * (x + 1) as f32,
-                                            30.0 + wy + h * (y + 1) as f32,
-                                        ],
-                                        imgui::ImColor32::WHITE,
-                                        imgui::ImColor32::WHITE,
-                                        imgui::ImColor32::WHITE,
-                                        imgui::ImColor32::WHITE,
-                                    );
+                                let l = ui.get_window_draw_list();
+                                let w = 15.0;
+                                let h = 15.0;
+                                for x in 0..16 {
+                                    for y in 0..16 {
+                                        if let tilemap::Tile::Filled(..) = *tilemap.tile(x, y) {
+                                            l.add_rect_filled_multicolor(
+                                                [
+                                                    10.0 + wx + w * x as f32,
+                                                    30.0 + wy + h * y as f32,
+                                                ],
+                                                [
+                                                    10.0 + wx + w * (x + 1) as f32,
+                                                    30.0 + wy + h * (y + 1) as f32,
+                                                ],
+                                                imgui::ImColor32::WHITE,
+                                                imgui::ImColor32::WHITE,
+                                                imgui::ImColor32::WHITE,
+                                                imgui::ImColor32::WHITE,
+                                            );
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                    });
+                            });
+                    }
+                }
 
                 platform.prepare_render(&ui, engine.surface().window());
 
@@ -359,11 +388,16 @@ fn main() -> ! {
 
                     //render pass started, can now issue draw instructions
 
-                    engine.get_material(&desert_mat).draw(
-                        &mut builder,
-                        &*square,
-                        desert.instance_count(),
-                    );
+                    for (renderer, tilemap) in world
+                        .query::<(&rendering::Renderer, &tilemap::Tilemap)>()
+                        .iter(&mut world)
+                    {
+                        engine.get_material(&renderer.material).draw(
+                            &mut builder,
+                            &*square,
+                            tilemap.instance_count(),
+                        );
+                    }
 
                     renderer
                         .draw_commands(
@@ -498,7 +532,11 @@ fn main() -> ! {
                     if grid_x < 16 && grid_y < 16 {
                         println!("grid {}, {}", grid_x, grid_y);
 
-                        desert.toggle(grid_x, grid_y);
+                        if let Some(mut i) = world.get_entity_mut(inspecting) {
+                            if let Some(mut tilemap) = i.get_mut::<tilemap::Tilemap>() {
+                                tilemap.toggle(grid_x, grid_y);
+                            }
+                        }
                     }
                 }
             }
