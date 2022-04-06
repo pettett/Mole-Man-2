@@ -34,8 +34,8 @@ impl TilemapSpriteConfigEditor {
     pub fn run(&mut self, ui: &imgui::Ui) {
         let [x, y] = self.size;
 
-        let uv_x = 32.0 / x as f32;
-        let uv_y = 16.0 / y as f32;
+        //let uv_x = 32.0 / x as f32;
+        //let uv_y = 16.0 / y as f32;
 
         let [img_x, img_y] = [x as f32 * 4.0, y as f32 * 4.0];
 
@@ -131,50 +131,27 @@ impl TilemapSpriteConfigEditor {
 
                 let mut changed = false;
 
-                for y in [Orientation::N, Orientation::NONE, Orientation::S] {
+                for off_y in -1..=1 {
                     ui.table_next_row_with_height(imgui::TableRowFlags::empty(), 50.0);
 
-                    for x in [Orientation::W, Orientation::NONE, Orientation::E] {
+                    for off_x in -1..=1 {
                         ui.table_next_column();
 
-                        let dir = match (y, x) {
-                            (x, Orientation::NONE) => x,
-                            (Orientation::NONE, y) => y,
-                            (Orientation::N, Orientation::E) => Orientation::NE,
-                            (Orientation::N, Orientation::W) => Orientation::NW,
-                            (Orientation::S, Orientation::E) => Orientation::SE,
-                            (Orientation::S, Orientation::W) => Orientation::SW,
-                            _ => panic!("impossible"),
-                        };
+                        let dir = Orientation::orient(off_x, off_y);
 
                         if dir != Orientation::NONE {
                             //we know this direction is valid
                             let condition = o.get_requirement_mut(dir).unwrap();
 
-                            if condition.is_none() {
-                                //contains no value
-                                if ui.button(format!("? {:?}", dir)) {
-                                    // add
+                            let (label, next_val) = match condition {
+                                None => (format!("? {:?}", dir), Some(true)),
+                                Some(true) => (format!("+ {:?}", dir), Some(false)),
+                                Some(false) => (format!("- {:?}", dir), None),
+                            };
 
-                                    *condition = Some(true);
-                                    changed = true;
-                                }
-                            } else if condition.unwrap() {
-                                //contains value true
-
-                                if ui.button(format!("+ {:?}", dir)) {
-                                    // remove
-
-                                    *condition = Some(false);
-                                    changed = true;
-                                }
-                            } else {
-                                //contains value false
-
-                                if ui.button(format!("- {:?}", dir)) {
-                                    *condition = None;
-                                    changed = true;
-                                }
+                            if ui.button(label) {
+                                *condition = next_val;
+                                changed = true;
                             }
                         }
                     }

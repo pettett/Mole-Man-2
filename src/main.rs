@@ -330,20 +330,54 @@ fn main() -> ! {
                                 let h = 15.0;
                                 for x in 0..16 {
                                     for y in 0..16 {
-                                        if let tilemap::Tile::Filled(..) = *tilemap.tile(x, y) {
+                                        if let tilemap::Tile::Filled(o) = *tilemap.tile(x, y) {
+                                            fn col(e: bool) -> u8 {
+                                                if e {
+                                                    255
+                                                } else {
+                                                    0
+                                                }
+                                            }
+                                            //North and south are opposite of what we expect because of flipped y direction
+                                            let col_upr_left = imgui::ImColor32::from_rgb(
+                                                col(o.contains(tilemap::Orientation::N)),
+                                                col(o.contains(tilemap::Orientation::W)),
+                                                col(o.contains(tilemap::Orientation::NW)),
+                                            );
+
+                                            let col_upr_right = imgui::ImColor32::from_rgb(
+                                                col(o.contains(tilemap::Orientation::N)),
+                                                col(o.contains(tilemap::Orientation::E)),
+                                                col(o.contains(tilemap::Orientation::NE)),
+                                            );
+
+                                            let col_bot_left = imgui::ImColor32::from_rgb(
+                                                col(o.contains(tilemap::Orientation::S)),
+                                                col(o.contains(tilemap::Orientation::W)),
+                                                col(o.contains(tilemap::Orientation::SW)),
+                                            );
+
+                                            let col_bot_right = imgui::ImColor32::from_rgb(
+                                                col(o.contains(tilemap::Orientation::S)),
+                                                col(o.contains(tilemap::Orientation::E)),
+                                                col(o.contains(tilemap::Orientation::SE)),
+                                            );
+
+                                            //Y coordinates need to be flipped as we draw from top to bottom,
+                                            //and so y coordinates increase as we decrease in window space
                                             l.add_rect_filled_multicolor(
                                                 [
                                                     10.0 + wx + w * x as f32,
-                                                    30.0 + wy + h * y as f32,
+                                                    30.0 + wy + h * (16 - y) as f32,
                                                 ],
                                                 [
                                                     10.0 + wx + w * (x + 1) as f32,
-                                                    30.0 + wy + h * (y + 1) as f32,
+                                                    30.0 + wy + h * (16 - (y + 1)) as f32,
                                                 ],
-                                                imgui::ImColor32::WHITE,
-                                                imgui::ImColor32::WHITE,
-                                                imgui::ImColor32::WHITE,
-                                                imgui::ImColor32::WHITE,
+                                                col_upr_left,
+                                                col_upr_right,
+                                                col_bot_right,
+                                                col_bot_left,
                                             );
                                         }
                                     }
