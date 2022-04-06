@@ -1982,6 +1982,7 @@ dependencies = [
  "imgui",
  "imgui-winit-support",
  "rand 0.8.5",
+ "serde_json",
  "vulkano",
  "vulkano-shaders",
  "vulkano-win",

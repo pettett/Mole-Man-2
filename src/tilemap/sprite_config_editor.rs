@@ -1,7 +1,4 @@
-use std::{
-    cell::RefCell,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use imgui::TextureId;
 use vulkano::image::StorageImage;
@@ -88,22 +85,22 @@ impl TilemapSpriteConfigEditor {
 
         ui.separator();
 
+        let mut sprite_config = self.target.lock().unwrap();
+
         let mut s = (self.selected_tile.0 as i32, self.selected_tile.1 as i32);
 
         imgui::Drag::new("X")
-            .range(0, 15)
+            .range(0, sprite_config.grid_width as i32 - 1)
             .speed(1.0)
             .build(ui, &mut s.0);
 
         imgui::Drag::new("Y")
-            .range(0, 15)
+            .range(0, sprite_config.grid_height as i32 - 1)
             .speed(1.0)
             .build(ui, &mut s.1);
 
-        self.selected_tile.0 = 15.min(s.0 as usize);
-        self.selected_tile.1 = 15.min(s.1 as usize);
-
-        let mut sprite_config = self.target.lock().unwrap();
+        self.selected_tile.0 = s.0 as usize;
+        self.selected_tile.1 = s.1 as usize;
 
         if sprite_config.orientations.contains_key(&self.selected_tile) {
             if ui.button("Delete") {

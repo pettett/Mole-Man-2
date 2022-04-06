@@ -184,11 +184,11 @@ fn main() -> ! {
     //create the tilemap for the desert tile map then create it's material
     let config = Arc::new(Mutex::new(tilemap::TilemapSpriteConfig::new(16, 8)));
 
-    let desert = tilemap::Tilemap::new(config.clone(), sprite_sheet.clone(), &engine);
+    let desert = tilemap::TilemapRenderer::new(config.clone(), sprite_sheet.clone(), &engine);
 
     let desert_mat = desert.create_material(&mut engine, &transform);
 
-    let mut config_editor = tilemap::editor::TilemapSpriteConfigEditor::new(
+    let mut config_editor = tilemap::sprite_config_editor::TilemapSpriteConfigEditor::new(
         &mut renderer,
         config.clone(),
         sprite_sheet.clone(),
@@ -318,7 +318,7 @@ fn main() -> ! {
                     .build(&ui, || config_editor.run(&ui));
                 //get entity will not panic if no entity present
                 if let Some(i) = world.get_entity(inspecting) {
-                    if let Some(tilemap) = i.get::<tilemap::Tilemap>() {
+                    if let Some(tilemap) = i.get::<tilemap::TilemapRenderer>() {
                         imgui::Window::new("Tilemap - desert")
                             .size([200.0, 200.0], imgui::Condition::FirstUseEver)
                             .build(&ui, || {
@@ -422,7 +422,7 @@ fn main() -> ! {
                     //render pass started, can now issue draw instructions
 
                     for (renderer, tilemap) in world
-                        .query::<(&rendering::Renderer, &tilemap::Tilemap)>()
+                        .query::<(&rendering::Renderer, &tilemap::TilemapRenderer)>()
                         .iter(&mut world)
                     {
                         engine.get_material(&renderer.material).draw(
@@ -566,7 +566,7 @@ fn main() -> ! {
                         println!("grid {}, {}", grid_x, grid_y);
 
                         if let Some(mut i) = world.get_entity_mut(inspecting) {
-                            if let Some(mut tilemap) = i.get_mut::<tilemap::Tilemap>() {
+                            if let Some(mut tilemap) = i.get_mut::<tilemap::TilemapRenderer>() {
                                 tilemap.toggle(grid_x, grid_y);
                             }
                         }
