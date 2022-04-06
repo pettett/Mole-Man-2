@@ -1,4 +1,7 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::RefCell,
+    sync::{Arc, Mutex},
+};
 
 use imgui::TextureId;
 use vulkano::image::StorageImage;
@@ -8,7 +11,7 @@ use crate::{imgui_vulkano_renderer::ImGuiRenderer, texture::Texture};
 use super::{Orientation, TilemapSpriteConfig};
 
 pub struct TilemapSpriteConfigEditor {
-    target: Arc<RefCell<TilemapSpriteConfig>>,
+    target: Arc<Mutex<TilemapSpriteConfig>>,
     tex: TextureId,
     size: [u32; 2],
     selected_tile: (usize, usize),
@@ -17,7 +20,7 @@ pub struct TilemapSpriteConfigEditor {
 impl TilemapSpriteConfigEditor {
     pub fn new(
         renderer: &mut ImGuiRenderer,
-        target: Arc<RefCell<TilemapSpriteConfig>>,
+        target: Arc<Mutex<TilemapSpriteConfig>>,
         tex: Texture<StorageImage>,
     ) -> Self {
         let ui_tex = renderer.make_ui_texture(tex.clone());
@@ -69,7 +72,7 @@ impl TilemapSpriteConfigEditor {
 
                 let l = match (x, y) {
                     p if p == self.selected_tile => String::from("X"),
-                    p if self.target.borrow().orientations.contains_key(&p) => {
+                    p if self.target.lock().unwrap().orientations.contains_key(&p) => {
                         format!("[{},{}]", p.0, p.1)
                     }
                     p => format!("{},{}", p.0, p.1),
@@ -100,24 +103,13 @@ impl TilemapSpriteConfigEditor {
         self.selected_tile.0 = 15.min(s.0 as usize);
         self.selected_tile.1 = 15.min(s.1 as usize);
 
-        if self
-            .target
-            .borrow()
-            .orientations
-            .contains_key(&self.selected_tile)
-        {
+        let mut sprite_config = self.target.lock().unwrap();
+
+        if sprite_config.orientations.contains_key(&self.selected_tile) {
             if ui.button("Delete") {
-                self.target
-                    .borrow_mut()
-                    .orientations
-                    .remove(&self.selected_tile);
+                sprite_config.orientations.remove(&self.selected_tile);
             } else {
-                let mut o = *self
-                    .target
-                    .borrow()
-                    .orientations
-                    .get(&self.selected_tile)
-                    .unwrap();
+                let mut o = *sprite_config.orientations.get(&self.selected_tile).unwrap();
 
                 let tbl = ui
                     .begin_table_with_sizing(
@@ -137,9 +129,7 @@ impl TilemapSpriteConfigEditor {
                     for off_x in -1..=1 {
                         ui.table_next_column();
 
-                        let dir = Orientation::orient(off_x, off_y);
-
-                        if dir != Orientation::NONE {
+                        if let Some(dir) = Orientation::orient(off_x, off_y) {
                             //we know this direction is valid
                             let condition = o.get_requirement_mut(dir).unwrap();
 
@@ -159,10 +149,7 @@ impl TilemapSpriteConfigEditor {
 
                 if changed {
                     println!("Changed!");
-                    self.target
-                        .borrow_mut()
-                        .orientations
-                        .insert(self.selected_tile, o);
+                    sprite_config.orientations.insert(self.selected_tile, o);
                 }
 
                 tbl.end();
@@ -182,11 +169,55 @@ impl TilemapSpriteConfigEditor {
                         imgui::ImColor32::WHITE,
                     )
                     .build();
+
+                let reqs = sprite_config.orientations[&self.selected_tile];
+
+                // Draw the sprite preview -
+                //  a 3 by 3 grid of sprites that show how the selected sprite's orientation
+                //  will interact with it's surroundings
+                for off_x in -1..=1 {
+                    for off_y in -1..=1 {
+                        //Only draw a tile if we have specifically requested it
+                        if let Some((disp_x, disp_y)) =
+                            if let Some(o) = Orientation::orient(off_x, off_y) {
+                                //Test if this direction has been marked as solid
+
+                                if let Some(Some(true)) = reqs.get_requirement(o) {
+                                    //TODO: Allow placed tiles to also react to their surroundings
+                                    Some((2, 2))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                //display the selected tile
+
+                                Some(self.selected_tile)
+                            }
+                        {
+                            let (uv_min, uv_max) = sprite_config.position_uv(disp_x, disp_y);
+
+                            ui.get_window_draw_list()
+                                .add_image(
+                                    self.tex,
+                                    [
+                                        d_x + 50.0 * (off_x as f32 + 1.0),
+                                        d_y + 50.0 * (off_y as f32 + 1.0),
+                                    ],
+                                    [
+                                        d_x + 50.0 * (off_x as f32 + 2.0),
+                                        d_y + 50.0 * (off_y as f32 + 2.0),
+                                    ],
+                                )
+                                .uv_min(uv_min)
+                                .uv_max(uv_max)
+                                .build();
+                        }
+                    }
+                }
             }
         } else {
             if ui.button("Add Entry") {
-                self.target
-                    .borrow_mut()
+                sprite_config
                     .orientations
                     .insert(self.selected_tile, Default::default());
             }

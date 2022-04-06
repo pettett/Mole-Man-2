@@ -12,7 +12,7 @@ pub mod uniform;
 use bevy_ecs::prelude as ecs;
 use bevy_ecs::schedule::Stage;
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use imgui_vulkano_renderer::ImGuiRenderer;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
@@ -182,16 +182,15 @@ fn main() -> ! {
         .expect("Failed to initialize renderer");
 
     //create the tilemap for the desert tile map then create it's material
+    let config = Arc::new(Mutex::new(tilemap::TilemapSpriteConfig::new(16, 8)));
 
-    let desert = tilemap::Tilemap::new(sprite_sheet.clone(), &engine);
+    let desert = tilemap::Tilemap::new(config.clone(), sprite_sheet.clone(), &engine);
 
     let desert_mat = desert.create_material(&mut engine, &transform);
 
-    let config = Default::default(); // Arc::new(RefCell::new(tilemap::TilemapSpriteConfig::default()));
-
     let mut config_editor = tilemap::editor::TilemapSpriteConfigEditor::new(
         &mut renderer,
-        config,
+        config.clone(),
         sprite_sheet.clone(),
     );
 

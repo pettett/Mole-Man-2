@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 pub mod editor;
 
 use crate::{engine, rendering::Renderer, texture::Texture, uniform::Transformations};
@@ -29,17 +34,17 @@ bitflags! {
 }
 
 impl Orientation {
-    pub fn orient(off_x: isize, off_y: isize) -> Orientation {
+    pub fn orient(off_x: isize, off_y: isize) -> Option<Orientation> {
         match (off_x, off_y) {
-            (1, 0) => Orientation::E,
-            (-1, 0) => Orientation::W,
-            (0, 1) => Orientation::N,
-            (0, -1) => Orientation::S,
-            (1, 1) => Orientation::NE,
-            (-1, 1) => Orientation::NW,
-            (1, -1) => Orientation::SE,
-            (-1, -1) => Orientation::SW,
-            _ => panic!("Out of range"),
+            (1, 0) /* _*/ => Some(Orientation::E),
+            (-1, 0)/* _*/ => Some(Orientation::W),
+            (0, 1) /* _*/ => Some(Orientation::N),
+            (0, -1)/* _*/ => Some(Orientation::S),
+            (1, 1) /* _*/ => Some(Orientation::NE),
+            (-1, 1) /*_*/ => Some(Orientation::NW),
+            (1, -1) /*_*/ => Some(Orientation::SE),
+            (-1, -1)/*_*/ => Some(Orientation::SW),
+            _ => None,
         }
     }
 }
@@ -64,6 +69,7 @@ struct TileData {
 #[repr(C)]
 struct TilemapData {
     //width and height of cells in UV space
+    //FIXME: These variables are named *wrong*
     tile_width: f32,
     tile_height: f32,
     grid_width: u32,
@@ -75,8 +81,11 @@ pub struct Tilemap {
     tiles: [[Tile; HEIGHT]; WIDTH],
     dirty: bool,
     instance_count: u32,
-    texture: Texture<StorageImage>,
+    sprite: Arc<Mutex<TilemapSpriteConfig>>,
     map_buffer: Arc<CpuAccessibleBuffer<TilemapData>>,
+
+    //the actual GPU texture reference for the texture
+    texture: Texture<StorageImage>,
 }
 #[derive(Default, Clone, Copy)]
 pub struct TileRequirements {
@@ -92,6 +101,7 @@ pub struct TileRequirements {
 }
 
 impl TileRequirements {
+    /// Get the tile requirement that corresponds to this direction - mutable
     pub fn get_requirement_mut(&mut self, o: Orientation) -> Result<&mut Option<bool>, ()> {
         match o {
             Orientation::N => Ok(&mut self.n),
@@ -107,6 +117,22 @@ impl TileRequirements {
             _ => Err(()),
         }
     }
+    /// Get the tile requirement that corresponds to this direction
+    pub fn get_requirement(&self, o: Orientation) -> Option<&Option<bool>> {
+        match o {
+            Orientation::N => Some(&self.n),
+            Orientation::S => Some(&self.s),
+            Orientation::E => Some(&self.e),
+            Orientation::W => Some(&self.w),
+
+            Orientation::NE => Some(&self.ne),
+            Orientation::NW => Some(&self.nw),
+            Orientation::SE => Some(&self.se),
+            Orientation::SW => Some(&self.sw),
+
+            _ => None,
+        }
+    }
 }
 
 ///Store config for a tilemap sprite
@@ -114,15 +140,44 @@ impl TileRequirements {
 pub struct TilemapSpriteConfig {
     ///Valid placements for tile (usize,usize)
     orientations: HashMap<(usize, usize), TileRequirements>,
+
+    grid_width: usize,
+    grid_height: usize,
+
+    tile_width: usize,
+    tile_height: usize,
 }
 
-impl Default for TilemapSpriteConfig {
-    fn default() -> Self {
+impl TilemapSpriteConfig {
+    pub fn new(grid_width: usize, grid_height: usize) -> Self {
         Self {
-            orientations: HashMap::new(),
+            tile_width: 8,
+            tile_height: 8,
+
+            grid_width,
+            grid_height,
+            orientations: HashMap::default(),
         }
     }
+
+    pub fn tile_size_uv(&self) -> [f32; 2] {
+        [1.0 / self.grid_width as f32, 1.0 / self.grid_height as f32]
+    }
+
+    pub fn grid_width(&self) -> u32 {
+        self.grid_width as u32
+    }
+
+    pub fn position_uv(&self, x: usize, y: usize) -> ([f32; 2], [f32; 2]) {
+        let [tile_width, tile_height] = self.tile_size_uv();
+
+        (
+            [tile_width * x as f32, tile_height * y as f32],
+            [tile_width * (x + 1) as f32, tile_height * (y + 1) as f32],
+        )
+    }
 }
+
 ///Tilemap system to fix any that are marked as dirty
 pub fn update_tilemaps(mut query: ecs::Query<&mut Tilemap>) {
     query.for_each_mut(|mut tilemap| tilemap.apply_changes())
@@ -145,30 +200,41 @@ pub fn offset(x: usize, y: usize, off_x: isize, off_y: isize) -> Option<(usize, 
 }
 
 impl Tilemap {
-    pub fn new(texture: Texture<StorageImage>, engine: &engine::Engine) -> Self {
-        let map_buffer = CpuAccessibleBuffer::from_data(
-            engine.device(),
-            BufferUsage::all(), //TODO: this should be more specific?
-            false,
-            TilemapData {
-                tile_width: 8.0 / texture.get_size()[0] as f32,
-                tile_height: 8.0 / texture.get_size()[1] as f32,
-                sheet_width: texture.get_size()[0] / 8,
-                grid_width: 16,
-                tiles: [TileData {
-                    sheet_pos: 0,
-                    grid_pos: 0,
-                }; 16 * 16],
-            },
-        )
-        .expect("failed to create buffer");
+    pub fn new(
+        sprite: Arc<Mutex<TilemapSpriteConfig>>,
+        texture: Texture<StorageImage>,
+        engine: &engine::Engine,
+    ) -> Self {
+        let map_buffer = {
+            let sprite_lock = sprite.lock().unwrap();
+
+            let [tile_width, tile_height] = sprite_lock.tile_size_uv();
+
+            CpuAccessibleBuffer::from_data(
+                engine.device(),
+                BufferUsage::all(), //TODO: this should be more specific?
+                false,
+                TilemapData {
+                    tile_width,
+                    tile_height,
+                    sheet_width: sprite_lock.grid_width(),
+                    grid_width: 16,
+                    tiles: [TileData {
+                        sheet_pos: 0,
+                        grid_pos: 0,
+                    }; 16 * 16],
+                },
+            )
+            .expect("failed to create buffer")
+        };
 
         let mut rng = rand::thread_rng();
 
         let mut s = Self {
             tiles: [[Tile::Filled(Orientation::all()); 16]; 16],
-            texture,
+            sprite,
             instance_count: 0,
+            texture,
             dirty: true,
             map_buffer,
         };
