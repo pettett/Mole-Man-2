@@ -12,7 +12,6 @@ use vulkano::{
         StorageImage,
     },
     sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo},
-    shader::spirv::StorageClass,
     sync::{self, GpuFuture},
 };
 

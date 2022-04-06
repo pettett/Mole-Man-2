@@ -1,8 +1,5 @@
 use std::{
     collections::HashMap,
-    iter::Map,
-    marker::PhantomData,
-    rc::{Rc, Weak},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -23,14 +20,10 @@ use vulkano::{
     shader::ShaderModule,
     swapchain::{Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError},
 };
-use vulkano_win::VkSurfaceBuild;
-use winit::{
-    dpi::PhysicalSize,
-    event_loop::EventLoop,
-    window::{Window, WindowBuilder},
-};
 
-use crate::{compute, get_physical, gl, material::Material};
+use winit::{dpi::PhysicalSize, window::Window};
+
+use crate::{gl, material::Material};
 
 static NEXT_MATERIAL_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -59,7 +52,6 @@ pub struct Engine {
 }
 impl Engine {
     pub fn init(
-        instance: Arc<Instance>,
         physical_device: &PhysicalDevice,
         graphics_queue: &QueueFamily,
         surface: Arc<Surface<Window>>,

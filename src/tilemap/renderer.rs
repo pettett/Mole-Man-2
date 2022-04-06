@@ -1,4 +1,4 @@
-use crate::{engine, rendering::Renderer, texture::Texture, uniform::Transformations};
+use crate::{engine, texture::Texture, uniform::Transformations};
 
 use rand::Rng;
 use std::sync::{Arc, Mutex};

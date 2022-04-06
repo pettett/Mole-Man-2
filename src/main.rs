@@ -11,13 +11,13 @@ pub mod uniform;
 
 use bevy_ecs::prelude as ecs;
 use bevy_ecs::schedule::Stage;
-use std::cell::RefCell;
+
 use std::sync::{Arc, Mutex};
 
 use imgui_vulkano_renderer::ImGuiRenderer;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
-use vulkano::descriptor_set::WriteDescriptorSet;
+
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
 use vulkano::device::DeviceExtensions;
 
@@ -32,7 +32,7 @@ use winit::event::{ElementState, Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 mod clipboard;
-use imgui::{self, Image};
+use imgui::{self};
 
 use crate::mesh::Mesh;
 use crate::texture::Texture;
@@ -80,7 +80,6 @@ fn main() -> ! {
     let (physical_device, graphics_queue) = get_physical(&instance, device_extensions, &surface);
 
     let mut engine = engine::Engine::init(
-        instance.clone(),
         &physical_device,
         &graphics_queue,
         surface,
@@ -90,9 +89,9 @@ fn main() -> ! {
     let square = <dyn Mesh>::create_unit_square(engine.queue());
 
     //let vs = vs::load(device.clone()).unwrap();
-    let vs_texture = vs_texture::load(engine.device()).unwrap();
+    //let vs_texture = vs_texture::load(engine.device()).unwrap();
     //    let fs = fs::load(device.clone()).unwrap();
-    let fs_texture = fs_texture::load(engine.device()).unwrap();
+    //let fs_texture = fs_texture::load(engine.device()).unwrap();
 
     //let mut tile_positions = [[1f32, 1f32], [1f32, 1f32], [1f32, 1f32]];
 
@@ -125,7 +124,7 @@ fn main() -> ! {
 
     transform.update_buffer();
 
-    let cobblestone = Texture::load("assets/cobblestone.png", &engine);
+    //let cobblestone = Texture::load("assets/cobblestone.png", &engine);
 
     // let mat_texture = engine.create_material(
     //     vs_texture,
@@ -182,7 +181,11 @@ fn main() -> ! {
         .expect("Failed to initialize renderer");
 
     //create the tilemap for the desert tile map then create it's material
-    let config = Arc::new(Mutex::new(tilemap::TilemapSpriteConfig::new(16, 8)));
+    let config = Arc::new(Mutex::new(tilemap::TilemapSpriteConfig::new_or_load(
+        "assets/tileset.png.tileset.json",
+        16,
+        8,
+    )));
 
     let desert = tilemap::TilemapRenderer::new(config.clone(), sprite_sheet.clone(), &engine);
 

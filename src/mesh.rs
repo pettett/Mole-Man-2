@@ -47,14 +47,14 @@ impl dyn Mesh {
             color: [1., 1., 0.],
         };
 
-        let (vertex_buffer, vertex_future) = ImmutableBuffer::from_iter(
+        let (vertex_buffer, _vertex_future) = ImmutableBuffer::from_iter(
             vec![vertex1, vertex2, vertex3, vertex4].into_iter(),
             BufferUsage::vertex_buffer(),
             queue.clone(),
         )
         .unwrap();
 
-        let (index_buffer, index_future) = ImmutableBuffer::from_iter(
+        let (index_buffer, _index_future) = ImmutableBuffer::from_iter(
             vec![0u32, 1u32, 2u32, 2u32, 0u32, 3u32].into_iter(),
             BufferUsage::index_buffer(),
             queue.clone(),

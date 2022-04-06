@@ -5,13 +5,13 @@ use vulkano::image::StorageImage;
 
 use crate::{imgui_vulkano_renderer::ImGuiRenderer, texture::Texture};
 
-use super::{Orientation, TilemapSpriteConfig};
+use super::{GridCoordinate, Orientation, TilemapSpriteConfig};
 
 pub struct TilemapSpriteConfigEditor {
     target: Arc<Mutex<TilemapSpriteConfig>>,
     tex: TextureId,
     size: [u32; 2],
-    selected_tile: (usize, usize),
+    selected_tile: GridCoordinate,
 }
 
 impl TilemapSpriteConfigEditor {
@@ -27,11 +27,13 @@ impl TilemapSpriteConfigEditor {
             tex: id,
             target,
             size: tex.get_size(),
-            selected_tile: (0, 0),
+            selected_tile: (0, 0).into(),
         }
     }
 
     pub fn run(&mut self, ui: &imgui::Ui) {
+        let mut sprite_config = self.target.lock().unwrap();
+
         let [x, y] = self.size;
 
         //let uv_x = 32.0 / x as f32;
@@ -54,25 +56,25 @@ impl TilemapSpriteConfigEditor {
         let tbl = ui
             .begin_table_with_sizing(
                 "str_id",
-                16,
+                sprite_config.grid_width,
                 imgui::TableFlags::NO_PAD_INNER_X | imgui::TableFlags::NO_PAD_OUTER_X,
                 [img_x, img_y],
                 0.0,
             )
             .unwrap();
 
-        for y in 0..8 {
+        for y in 0..sprite_config.grid_height {
             ui.table_next_row_with_height(imgui::TableRowFlags::empty(), 32.0);
 
-            for x in 0..16 {
+            for x in 0..sprite_config.grid_width {
                 ui.table_next_column();
 
-                let l = match (x, y) {
+                let l = match (x, y).into() {
                     p if p == self.selected_tile => String::from("X"),
-                    p if self.target.lock().unwrap().orientations.contains_key(&p) => {
-                        format!("[{},{}]", p.0, p.1)
+                    p if sprite_config.orientations.contains_key(&p) => {
+                        format!("[{},{}]", p.x, p.y)
                     }
-                    p => format!("{},{}", p.0, p.1),
+                    p => format!("{},{}", p.x, p.y),
                 };
 
                 ui.text_colored([0.0, 0.0, 0.0, 1.0], l);
@@ -85,9 +87,7 @@ impl TilemapSpriteConfigEditor {
 
         ui.separator();
 
-        let mut sprite_config = self.target.lock().unwrap();
-
-        let mut s = (self.selected_tile.0 as i32, self.selected_tile.1 as i32);
+        let mut s = (self.selected_tile.x as i32, self.selected_tile.y as i32);
 
         imgui::Drag::new("X")
             .range(0, sprite_config.grid_width as i32 - 1)
@@ -99,8 +99,8 @@ impl TilemapSpriteConfigEditor {
             .speed(1.0)
             .build(ui, &mut s.1);
 
-        self.selected_tile.0 = s.0 as usize;
-        self.selected_tile.1 = s.1 as usize;
+        self.selected_tile.x = s.0 as usize;
+        self.selected_tile.y = s.1 as usize;
 
         if sprite_config.orientations.contains_key(&self.selected_tile) {
             if ui.button("Delete") {
@@ -188,7 +188,7 @@ impl TilemapSpriteConfigEditor {
                             } else {
                                 //display the selected tile
 
-                                Some(self.selected_tile)
+                                Some(self.selected_tile.into())
                             }
                         {
                             let (uv_min, uv_max) = sprite_config.position_uv(disp_x, disp_y);
@@ -218,6 +218,14 @@ impl TilemapSpriteConfigEditor {
                     .orientations
                     .insert(self.selected_tile, Default::default());
             }
+        }
+        ui.new_line();
+
+        //TODO: Should this be done automatically? think about this
+        if ui.button("Save") {
+            //TODO: Filename based asset system would be nice
+            let path = "assets/tileset.png.tileset.json";
+            sprite_config.save(path);
         }
     }
 }

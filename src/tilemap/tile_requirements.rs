@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use super::Orientation;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Serialize, Deserialize)]
 pub struct TileRequirements {
     n: Option<bool>,
     s: Option<bool>,
