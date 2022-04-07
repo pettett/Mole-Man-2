@@ -126,7 +126,7 @@ impl TilemapSpriteConfigEditor {
                     for off_x in -1..=1 {
                         ui.table_next_column();
 
-                        if let Some(dir) = Orientation::orient(off_x, off_y) {
+                        if let Some(dir) = Orientation::orient(off_x, -off_y) {
                             //we know this direction is valid
                             let condition = o.get_requirement_mut(dir).unwrap();
 
@@ -176,7 +176,7 @@ impl TilemapSpriteConfigEditor {
                     for off_y in -1..=1 {
                         //Only draw a tile if we have specifically requested it
                         if let Some((disp_x, disp_y)) =
-                            if let Some(o) = Orientation::orient(off_x, off_y) {
+                            if let Some(o) = Orientation::orient(off_x, -off_y) {
                                 //Test if this direction has been marked as solid
 
                                 if let Some(Some(true)) = reqs.get_requirement(o) {

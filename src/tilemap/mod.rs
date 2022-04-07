@@ -15,16 +15,32 @@ pub use self::sprite_config_editor::*;
 pub use self::tile_requirements::*;
 
 bitflags! {
+    /// Orientation of a tile with regards to it's surroundings
+    /// Order determined by [`TileRequirements`]
     pub struct Orientation: u8 {
         const NONE = 0;
+
         const N  = 0b00000001;
-        const E  = 0b00000010;
-        const S  = 0b00000100;
+        const S  = 0b00000010;
+        const E  = 0b00000100;
         const W  = 0b00001000;
-        const NW = 0b00010000;
-        const SW = 0b00100000;
-        const NE = 0b01000000;
-        const SE = 0b10000000;
+        const NE = 0b00010000;
+        const NW = 0b00100000;
+        const SE = 0b01000000;
+        const SW = 0b10000000;
+    }
+}
+impl From<TileRequirements> for Orientation {
+    fn from(reqs: TileRequirements) -> Self {
+        let mut o = Orientation::NONE;
+        // Go through the 8 cardinal directions and sync them to the orientation if they are applied in the requirement
+        // Only applied if the requirement is explicitly true
+        for i in 0..8 {
+            if let Some(true) = reqs.dirs[i] {
+                o.bits |= 1 << i;
+            }
+        }
+        o
     }
 }
 

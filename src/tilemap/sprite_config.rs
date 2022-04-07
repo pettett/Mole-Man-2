@@ -1,8 +1,14 @@
-use std::{collections::HashMap, fmt, io::BufReader};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    io::BufReader,
+    ops::{Index, IndexMut},
+};
 
 use bevy_ecs::prelude as ecs;
+use rand::{prelude::IteratorRandom, Rng};
 
-use super::TileRequirements;
+use super::{Orientation, TileRequirements};
 use serde::{
     de::{self, Unexpected, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -14,6 +20,9 @@ pub struct TilemapSpriteConfig {
     ///Valid placements for tile (usize,usize)
     pub orientations: HashMap<GridCoordinate, TileRequirements>,
 
+    #[serde(skip)]
+    coordinates: CoordinateSet,
+
     pub grid_width: usize,
     pub grid_height: usize,
 
@@ -21,7 +30,43 @@ pub struct TilemapSpriteConfig {
     pub tile_height: usize,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+struct CoordinateSet {
+    // store coordinate for all possible orientations
+    coordinates: HashMap<u8, HashSet<GridCoordinate>>,
+}
+impl Default for CoordinateSet {
+    fn default() -> Self {
+        Self {
+            coordinates: Default::default(),
+        }
+    }
+}
+
+impl CoordinateSet {
+    pub fn insert(&mut self, k: Orientation, v: GridCoordinate) {
+        if let Some(s) = self.coordinates.get_mut(&k.bits) {
+            s.insert(v);
+        } else {
+            self.coordinates.insert(k.bits, [v].into());
+        }
+    }
+
+    fn get(&self, index: Orientation) -> Option<GridCoordinate> {
+        let mut rng = rand::thread_rng();
+
+        if let Some(s) = self.coordinates.get(&(index.bits)) {
+            if let Some(c) = s.iter().choose(&mut rng) {
+                Some(*c)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct GridCoordinate {
     pub x: usize,
     pub y: usize,
@@ -93,10 +138,14 @@ impl<'de> Deserialize<'de> for GridCoordinate {
 
 impl TilemapSpriteConfig {
     pub fn new_or_load(asset: &'static str, grid_width: usize, grid_height: usize) -> Self {
-        match std::fs::File::open(asset) {
+        let mut config = match std::fs::File::open(asset) {
             Ok(file) => serde_json::from_reader(BufReader::new(file)).unwrap(),
-            Err(_) => TilemapSpriteConfig::new(asset, grid_width, grid_height),
-        }
+            Err(_) => TilemapSpriteConfig::new(grid_width, grid_height),
+        };
+
+        config.sync_coordinates();
+
+        config
     }
 
     pub fn save(&self, asset: &'static str) {
@@ -104,13 +153,14 @@ impl TilemapSpriteConfig {
         std::fs::write(asset, json).unwrap();
     }
 
-    pub fn new(asset: &'static str, grid_width: usize, grid_height: usize) -> Self {
+    pub fn new(grid_width: usize, grid_height: usize) -> Self {
         Self {
             tile_width: 8,
             tile_height: 8,
             grid_width,
             grid_height,
-            orientations: HashMap::default(),
+            orientations: Default::default(),
+            coordinates: Default::default(),
         }
     }
 
@@ -129,6 +179,45 @@ impl TilemapSpriteConfig {
             [tile_width * x as f32, tile_height * y as f32],
             [tile_width * (x + 1) as f32, tile_height * (y + 1) as f32],
         )
+    }
+
+    /// Search the spritemap for this orientation of tile,
+    /// starting at the most specific and getting progressively more vague
+    pub fn find_tile_index(&self, o: Orientation) -> Option<GridCoordinate> {
+        //Search the sprite data for this orientation,
+        self.coordinates.get(o)
+    }
+    /// Sync the coordinates array to the orientations hashmap
+    pub fn sync_coordinates(&mut self) {
+        for (k, v) in &mut self.orientations {
+            let mut coords = Vec::new();
+            //Push the first coordinate
+            coords.push(*v);
+
+            //for each cardinal direction
+            for i in 0..8 {
+                //For any bits that are null, double the size of the vector
+                if v.dirs[i].is_none() {
+                    let mut n_coords = Vec::with_capacity(coords.len() * 2);
+
+                    for c in coords {
+                        let mut dirs = c.dirs;
+
+                        dirs[i] = Some(true);
+                        n_coords.push(TileRequirements { dirs });
+
+                        dirs[i] = Some(false);
+                        n_coords.push(TileRequirements { dirs });
+                    }
+
+                    coords = n_coords;
+                }
+            }
+            for c in coords {
+                // Add to the set of coords that are valid in this orientation
+                self.coordinates.insert(c.into(), *k);
+            }
+        }
     }
 }
 
@@ -161,5 +250,68 @@ mod tests {
         map.insert(key, value);
 
         assert_eq!(deserialised, map);
+    }
+
+    #[test]
+    fn sync_coordinates() {
+        let mut c = TilemapSpriteConfig::new(4, 4);
+
+        c.orientations.insert(
+            (2, 2).into(),
+            TileRequirements {
+                dirs: [
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                ],
+            },
+        );
+
+        c.orientations.insert(
+            (2, 1).into(),
+            TileRequirements {
+                dirs: [
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                    Some(true),
+                ],
+            },
+        );
+        // Should insert into NONE and S
+        c.orientations.insert(
+            (1, 1).into(),
+            TileRequirements {
+                dirs: [
+                    Some(false),
+                    None,
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                ],
+            },
+        );
+
+        c.sync_coordinates();
+
+        assert!(c.find_tile_index(Orientation::all()).is_some());
+
+        assert!(c.find_tile_index(Orientation::NONE).is_some());
+        assert!(c.find_tile_index(Orientation::S).is_some());
+
+        // Nothing has set this
+        assert!(c.find_tile_index(Orientation::N).is_none());
     }
 }

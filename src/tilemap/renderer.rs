@@ -81,37 +81,15 @@ impl TilemapRenderer {
     }
 
     fn get_sheet_pos(&self, o: Orientation) -> u32 {
-        //TODO:
-        let n = o.contains(Orientation::N);
-        let e = o.contains(Orientation::E);
-        let s = o.contains(Orientation::S);
-        let w = o.contains(Orientation::W);
+        let t = self.sprite.try_lock().unwrap().find_tile_index(o);
 
-        let nw = o.contains(Orientation::NW);
-        let ne = o.contains(Orientation::NE);
-        let sw = o.contains(Orientation::SW);
-        let se = o.contains(Orientation::SE);
-
-        let mut rng = rand::thread_rng();
-
-        let (x, y) = match (n, e, s, w, nw, ne, sw, se) {
-            //air above
-            (false, true, true, true, _, _, _, _) => (rng.gen_range(1..=4), 0),
-            (true, false, true, true, _, _, _, _) => (5, rng.gen_range(1..=4)),
-            (true, true, false, true, _, _, _, _) => (rng.gen_range(1..=4), 5),
-            (true, true, true, false, _, _, _, _) => (0, rng.gen_range(1..=4)),
-            // bottom right corner
-            (true, false, false, true, _, _, _, _) => (5, 5),
-            // top left corner
-            (false, true, true, false, _, _, _, _) => (0, 0),
-            // top right corner
-            (false, false, true, true, _, _, _, _) => (5, 0),
-            // bottom left corner
-            (true, true, false, false, _, _, _, _) => (0, 5),
-            _ => (rng.gen_range(1..=4), rng.gen_range(1..=4)),
-        };
-
-        x + y * 16
+        if let Some(gc) = t {
+            let (x, y) = gc.into();
+            (x + y * 16) as u32
+        } else {
+            //FIXME: Better error texture for invalid sprites
+            17
+        }
     }
 
     pub fn apply_changes(&mut self) {
