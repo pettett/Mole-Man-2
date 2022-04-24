@@ -4,13 +4,18 @@ pub mod gl;
 pub mod imgui_vulkano_renderer;
 pub mod material;
 mod mesh;
+pub mod physics;
+pub mod player;
 pub mod rendering;
+pub mod sprite;
 pub mod texture;
 mod tilemap;
+pub mod transform;
 pub mod uniform;
 
-use bevy_ecs::prelude as ecs;
+pub use bevy_ecs::prelude as ecs;
 use bevy_ecs::schedule::Stage;
+use vulkano::pipeline::Pipeline;
 
 use std::sync::{Arc, Mutex};
 
@@ -28,7 +33,7 @@ use vulkano::sync::{self, FlushError, GpuFuture};
 
 use vulkano_win::VkSurfaceBuild;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Event, MouseButton, WindowEvent};
+use winit::event::{ElementState, Event, MouseButton, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 mod clipboard;
@@ -61,6 +66,27 @@ fn get_physical<'a>(
             PhysicalDeviceType::Other => 4,
         })
         .expect("no device available")
+}
+
+pub struct Time {
+    t: f32,
+    dt: f32,
+}
+impl Time {
+    pub fn progress(&mut self) {
+        self.t += self.dt;
+    }
+}
+
+pub struct InputEvent {
+    pub keycode: VirtualKeyCode,
+    pub state: ElementState,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, ecs:: StageLabel)]
+enum SystemTrigger {
+    OnUpdate,
+    OnKeyboardInput,
 }
 
 fn main() -> ! {
@@ -137,7 +163,9 @@ fn main() -> ! {
     //     ],
     // );
 
-    let sprite_sheet = Texture::load("assets/tileset.png", &engine);
+    let desert_sprite_sheet = Texture::load("assets/tileset.png", &engine);
+
+    let moleman_sprite_sheet = Texture::load("assets/moleman.png", &engine);
 
     let mut dragging = false;
 
@@ -187,15 +215,31 @@ fn main() -> ! {
         8,
     )));
 
-    let desert = tilemap::TilemapRenderer::new(config.clone(), sprite_sheet.clone(), &engine);
+    let desert =
+        tilemap::TilemapRenderer::new(config.clone(), desert_sprite_sheet.clone(), &engine);
 
     let desert_mat = desert.create_material(&mut engine, &transform);
 
     let mut config_editor = tilemap::sprite_config_editor::TilemapSpriteConfigEditor::new(
         &mut renderer,
         config.clone(),
-        sprite_sheet.clone(),
+        desert_sprite_sheet.clone(),
     );
+
+    let mole_mat = sprite::create_sprite_material(&mut engine, &moleman_sprite_sheet, &transform);
+
+    let mole_sprite = Arc::new(sprite::Sprite {
+        grid_width: 3,
+        grid_height: 1,
+        tile_width: 32,
+        tile_height: 32,
+    });
+
+    let mole_sprite_data = sprite::SpriteData {
+        sprite: mole_sprite.clone(),
+        tile_x: 0,
+        tile_y: 0,
+    };
 
     //    let m = engine.get_material(&desert_mat);
 
@@ -220,21 +264,119 @@ fn main() -> ! {
         })
         .id();
 
+    world
+        .spawn()
+        .insert(mole_sprite_data)
+        .insert(rendering::Renderer { material: mole_mat })
+        .insert(transform::Position(0.0, 0.0))
+        .insert(physics::Velocity(0.0, 0.0))
+        .insert(player::Player { speed: 1.0 });
+
+    world.insert_resource(Time { t: 0.0, dt: 0.1 });
+
     // Create a new Schedule, which defines an execution strategy for Systems
     let mut schedule = ecs::Schedule::default();
     // Add a Stage to our schedule. Each Stage in a schedule runs all of its systems
     // before moving on to the next Stage
 
     schedule.add_stage(
-        "update",
-        ecs::SystemStage::parallel().with_system(tilemap::update_tilemaps),
+        SystemTrigger::OnUpdate,
+        ecs::SystemStage::parallel()
+            .with_system(tilemap::tilemap_on_update)
+            .with_system(transform::bobble_on_update)
+            .with_system(physics::on_update),
+    );
+
+    schedule.add_stage(
+        SystemTrigger::OnKeyboardInput,
+        ecs::SystemStage::parallel().with_system(player::on_keyboard_input),
     );
 
     // MAIN LOOP ---------------------------------------------------------
 
     event_loop.run(move |event, _, control_flow| {
         platform.handle_event(imgui.io_mut(), engine.surface().window(), &event);
+        // Trigger system events
 
+        match event {
+            Event::MainEventsCleared => {
+                world.get_resource_mut::<Time>().unwrap().progress();
+
+                schedule
+                    .get_stage_mut::<ecs::SystemStage>(&SystemTrigger::OnUpdate)
+                    .unwrap()
+                    .run(&mut world);
+            }
+            Event::WindowEvent {
+                event: ref window_event,
+                ..
+            } => match window_event {
+                WindowEvent::Resized(_) => (),
+                WindowEvent::Moved(_) => (),
+                WindowEvent::CloseRequested => (),
+                WindowEvent::Destroyed => (),
+                WindowEvent::DroppedFile(_) => (),
+                WindowEvent::HoveredFile(_) => (),
+                WindowEvent::HoveredFileCancelled => (),
+                WindowEvent::ReceivedCharacter(_) => (),
+                WindowEvent::Focused(_) => (),
+                WindowEvent::KeyboardInput {
+                    device_id,
+                    input,
+                    is_synthetic,
+                } => {
+                    if let Some(v) = input.virtual_keycode {
+                        world.insert_resource(InputEvent {
+                            keycode: v,
+                            state: input.state,
+                        });
+
+                        schedule
+                            .get_stage_mut::<ecs::SystemStage>(&SystemTrigger::OnKeyboardInput)
+                            .map(|s| s.run(&mut world));
+                    }
+                }
+                WindowEvent::ModifiersChanged(_) => (),
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                    ..
+                } => (),
+                WindowEvent::CursorEntered { device_id } => (),
+                WindowEvent::CursorLeft { device_id } => (),
+                WindowEvent::MouseWheel {
+                    device_id,
+                    delta,
+                    phase,
+                    ..
+                } => (),
+                WindowEvent::MouseInput {
+                    device_id,
+                    state,
+                    button,
+                    ..
+                } => (),
+                WindowEvent::TouchpadPressure {
+                    device_id,
+                    pressure,
+                    stage,
+                } => (),
+                WindowEvent::AxisMotion {
+                    device_id,
+                    axis,
+                    value,
+                } => (),
+                WindowEvent::Touch(_) => (),
+                WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    new_inner_size,
+                } => (),
+                WindowEvent::ThemeChanged(_) => (),
+            },
+            _ => (),
+        };
+
+        // Manage window
         match event {
             Event::RedrawEventsCleared => {
                 if window_resized || recreate_swapchain {
@@ -307,8 +449,6 @@ fn main() -> ! {
                 if suboptimal {
                     recreate_swapchain = true;
                 }
-
-                schedule.run(&mut world);
 
                 platform
                     .prepare_frame(imgui.io_mut(), engine.surface().window())
@@ -428,11 +568,30 @@ fn main() -> ! {
                         .query::<(&rendering::Renderer, &tilemap::TilemapRenderer)>()
                         .iter(&mut world)
                     {
-                        engine.get_material(&renderer.material).draw(
-                            &mut builder,
-                            &*square,
-                            tilemap.instance_count(),
+                        let e = engine.get_material(&renderer.material);
+                        e.bind(&mut builder, &*square);
+                        e.draw(&mut builder, &*square, tilemap.instance_count());
+                    }
+
+                    for (renderer, sprite_data, pos) in world
+                        .query::<(
+                            &rendering::Renderer,
+                            &sprite::SpriteData,
+                            &transform::Position,
+                        )>()
+                        .iter(&mut world)
+                    {
+                        let e = engine.get_material(&renderer.material);
+
+                        e.bind(&mut builder, &*square);
+
+                        builder.push_constants(
+                            e.pipeline.layout().clone(),
+                            0,
+                            sprite_data.get_push_constants(pos),
                         );
+
+                        e.draw(&mut builder, &*square, 1);
                     }
 
                     renderer
@@ -576,6 +735,15 @@ fn main() -> ! {
                     }
                 }
             }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: _,
+                        button: MouseButton::Right,
+                        ..
+                    },
+                ..
+            } => {}
 
             Event::WindowEvent {
                 event: WindowEvent::Resized(_),

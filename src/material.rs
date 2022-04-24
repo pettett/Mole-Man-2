@@ -45,24 +45,29 @@ impl Material {
             pipeline,
         }
     }
+    pub fn bind(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        mesh: &dyn Mesh,
+    ) {
+        builder.bind_pipeline_graphics(self.pipeline.clone());
 
+        mesh.bind(builder);
+
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            self.pipeline.layout().clone(),
+            0,
+            self.descriptors(),
+        );
+    }
     pub fn draw(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         mesh: &dyn Mesh,
         instances: u32,
     ) {
-        builder.bind_pipeline_graphics(self.pipeline.clone());
-
-        mesh.bind(builder);
-
         builder
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.pipeline.layout().clone(),
-                0,
-                self.descriptors(),
-            )
             .draw_indexed(mesh.indices(), instances, 0, 0, 0)
             .unwrap();
     }

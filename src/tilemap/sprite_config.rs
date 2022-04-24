@@ -23,9 +23,11 @@ pub struct TilemapSpriteConfig {
     #[serde(skip)]
     coordinates: CoordinateSet,
 
+    /// Amount of tiles horizontally
     pub grid_width: usize,
     pub grid_height: usize,
 
+    ///Width of a tile (sub-sprite) inside the grid
     pub tile_width: usize,
     pub tile_height: usize,
 }

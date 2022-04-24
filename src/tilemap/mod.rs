@@ -89,7 +89,7 @@ struct TilemapData {
 }
 
 ///Tilemap system to fix any that are marked as dirty
-pub fn update_tilemaps(mut query: ecs::Query<&mut TilemapRenderer>) {
+pub fn tilemap_on_update(mut query: ecs::Query<&mut TilemapRenderer>) {
     query.for_each_mut(|mut tilemap| tilemap.apply_changes())
 }
 

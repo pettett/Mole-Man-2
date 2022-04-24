@@ -4,6 +4,12 @@ Sequel to Mole Man, a very bad game I made during lunch during GCSEs
 
 ## Change log
 
+`<= 24`
+
+- Basic sprite rendering
+- Player controller
+![Tilemap](readme/player1.jpg)
+
 `<= 06`
 
 - Tilemap editor preview
